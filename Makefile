@@ -7,9 +7,8 @@ crestfs: crestfs.c
 	
 test: crestfs
 	#test ! -d /tmp/doodle && mkdir /tmp/doodle
-	# single user, read-only. NB!
-	./crestfs -r -s -d /tmp/doodle
+	./crestfs /tmp/doodle /tmp/cachetest
 
 debug: crestfs
-	gdb --args ./crestfs -r -s -d /tmp/doodle/
+	gdb --args ./crestfs /tmp/doodle /tmp/cachetest
 	

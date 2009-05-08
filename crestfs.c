@@ -19,6 +19,12 @@
 #define FUSE_USE_VERSION  26
 #include <fuse.h>
 
+
+/*************************/
+// Important #define's which describe all behavior as a whole
+#define MAXCACHEAGE		3600*2
+//we may want this to be configurable in future - a command line option perhaps
+/*************************/
 void
 pathparse(const char *path,char *hostname,char *pathonly,int hostlen,int pathlen)
 {
@@ -41,14 +47,15 @@ pathparse(const char *path,char *hostname,char *pathonly,int hostlen,int pathlen
 }
 
 
-#define MAXDATASIZE 65535
+#define FETCHBLOCK 65535
 #define HOSTLEN 64
 #define PATHLEN 1024
 
 /* GIVEN: a 'path' where the first element is a hostname, the rest are path elements
    RETURN: 
+	number of bytes in the header and contents together
 */
-void 
+int 
 webfetch(const char *path,char *buffer,int maxlength, char *verb)
 {
 	int sockfd, numbytes;  
@@ -57,6 +64,7 @@ webfetch(const char *path,char *buffer,int maxlength, char *verb)
 	char hostname[HOSTLEN];
 	char pathstub[PATHLEN];
 	char *reqstr=0;
+	int bytessofar=0;
 //	char *origbuffer=buffer;
 
 	memset(&hints, 0, sizeof hints);
@@ -70,7 +78,7 @@ webfetch(const char *path,char *buffer,int maxlength, char *verb)
 	if ((rv = getaddrinfo(hostname, "80", &hints, &servinfo)) != 0) {
 		fprintf(stderr, "I failed to getaddrinfo: %s\n", gai_strerror(rv));
 		buffer[0]='\0';
-		return;
+		return 0;
 	}
 
 	// loop through all the results and connect to the first we can
@@ -95,7 +103,7 @@ webfetch(const char *path,char *buffer,int maxlength, char *verb)
 		exit(-1);
 	}
 	
-	printf("Okay, connectication has occurenced\n");
+	//printf("Okay, connectication has occurenced\n");
 
 /*     getsockname(sockfd, s, sizeof s);
     printf("client: connecting to %s\n", s);
@@ -107,13 +115,18 @@ webfetch(const char *path,char *buffer,int maxlength, char *verb)
 	free(reqstr);
 	
 
-    while ((numbytes = recv(sockfd, buffer, MAXDATASIZE-1, 0)) >0) {
+    while ((numbytes = recv(sockfd, buffer, FETCHBLOCK-1, 0)) >0 && bytessofar <= maxlength) {
 		//keep going
+		bytessofar+=numbytes;
 		buffer+=numbytes;
     }
 	if(numbytes<0) {
 		printf("Error - %d\n",numbytes);
-		return;
+		exit(1);
+	}
+	if(bytessofar > maxlength) {
+		printf("OVERFLOW: %d, max: %d\n",bytessofar,maxlength);
+		exit(1);
 	}
 
     buffer[numbytes] = '\0';
@@ -122,7 +135,7 @@ webfetch(const char *path,char *buffer,int maxlength, char *verb)
 
     close(sockfd);
 
-    return;
+    return bytessofar;
 }
 
 
@@ -136,16 +149,25 @@ reanswer(char *string,regmatch_t *re,char *buffer,int length)
 	//printf("Your answer is: %s\n",buffer);
 }
 
+//retrieve the value of an HTTP header
+//be warned the headers may not be a nul-terminated string
+//so don't do stupid stuff like strlen(headers) because it 
+//may not work
 void
 fetchheader(char *headers,char *name,char *results,int length)
 {
 	char *cursor=headers;
 	int blanklinecount=0;
-	while(cursor[0]!='\0' && cursor < headers+strlen(headers)) {
-		char *lineending=strstr(cursor,"\r\n");
+	while(cursor[0]!='\0') {
+		char *lineending=strstr(cursor,"\r\n"); //this is dangerous - cursor may not be null-terminated. But we're guaranteed to find \r\n
+												//somewhere, or else it's not valid HTTP protocol contents.
+												//we may need to change this out for \n in case we have invalid servers
+												//out there somewhere...
 		//printf("SEARCHING FROM: CHARACTERS: %c %c %c %c %c\n",cursor[0],cursor[1],cursor[2],cursor[3],cursor[4]);
 		//printf("Line ENDING IS: %p, %s\n",lineending,lineending);
 		if(lineending==cursor) {
+			printf("LINEENDING IS CURSOR! I bet this doesn't happen\n");
+			break;
 			blanklinecount++;
 		} else {
 			char line[1024];
@@ -155,7 +177,7 @@ fetchheader(char *headers,char *name,char *results,int length)
 			blanklinecount=0; //consecutive blank line counter must be reset
 			strlcpy(line,cursor,1024);
 			line[lineending-cursor]='\0';
-			//printf("my line is: %s\n",line);
+			printf("my line is: %s\n",line);
 			linelen=strlen(line);
 			colon=strchr(line,':');
 			if(colon) {
@@ -177,6 +199,7 @@ fetchheader(char *headers,char *name,char *results,int length)
 				//printf("No colon found!!!!!!!!!\n");
 			}
 		}
+		printf("BLANK LINE COUNT IS: %d\n",blanklinecount);
 		if(blanklinecount==2) {
 			break;
 		}
@@ -197,6 +220,17 @@ fetchstatus(char *headers)
 	return atoi(status);
 }
 
+int
+parsedate(char *datestring)
+{
+	struct tm mytime;
+	char *formatto=strptime(datestring,"%a, %e %b %Y %H:%M:%S %Z",&mytime);
+	if(formatto==0) {
+		return 0;
+	} else {
+		return mktime(&mytime);
+	}
+}
 /******************* END UTILITY FUNCTIONS< BEGIN ACTUALLY DOING OF STUFF!!!!! *********************/
 
 #define HEADERLEN 65535
@@ -209,7 +243,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 
     if (strcmp(path, "/") == 0) { /* The root directory of our file system. */
         stbuf->st_mode = S_IFDIR | 0755;
-        stbuf->st_nlink = 2;
+        stbuf->st_nlink = 2; //we could set this to '1' to force Find to be able to iterate...but not yet
     } else {
 		char hostname[80];
 		char pathpart[1024];
@@ -218,7 +252,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 		if(strcmp(pathpart,"/")==0) {
 			//root of some host, MUST be a directory no matter what.
 			stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
-			stbuf->st_nlink = 2; //with a . and a .. which will be wrong for certain.						
+			stbuf->st_nlink = 1; //use '1' to allow find(1) to decend within...					
 		} else {
 			char results[80];
 			webfetch(path,header,HEADERLEN,"HEAD");
@@ -240,24 +274,17 @@ crest_getattr(const char *path, struct stat *stbuf)
 			if(fetchstatus(header)>=300 && fetchstatus(header)<400 && strlen(results)>0 && results[strlen(results)-1]=='/') {
 				//e.g. - user has been redirected to a directory, then:
 				stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
-				stbuf->st_nlink = 2; //with a . and a .. which will be wrong for certain.			
+				stbuf->st_nlink = 1; //a lie, to allow find(1) to work.		
 			} else {
 				char length[32];
 				char date[32];
-				char *formatto=0;
-				struct tm mytime;
 				stbuf->st_mode = S_IFREG | 0755;
 				fetchheader(header,"last-modified",date,32);
 				//printf("Post-mangulation headers is: %s\n",header);
 				fetchheader(header,"content-length",length,32);
 				//printf("Post-mangulation headers is: %s\n",header);
 				//printf("BTW, date I'm trying to format: %s\n",date);
-				if((formatto=strptime(date,"%a, %e %b %Y %H:%M:%S %Z",&mytime))!=0) { //Tue, 18 Nov 2008 15:34:20 GMT
-					stbuf->st_mtime = mktime(&mytime);
-					//printf("I have a time! and it is: %s\n",asctime(&mytime));
-				}
-				//if(formatto)
-				//	printf("Formatto is: %s\n",formatto);
+				stbuf->st_mtime = parsedate(date);
 				stbuf->st_size = atoi(length);
 			}
 		}
@@ -375,10 +402,76 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	char *filebuffer=0;
 	char *headerend=0;
 	char length[32];
+	FILE *cachefile;
+	char cacheheaders[65535];
+	int cachelen=0; //if they're not in the first 64k, then too bad.
 	
+	char date[32];
+		
+	cachefile=fopen(path+1,"r+");
+	if(!cachefile) {
+		//couldn't make the cachefile easily, check we've got folders
+		char *slashloc=(char *)path+1;
+		while((slashloc=strchr(slashloc,'/'))!=0) {
+			char foldbuf[1024];
+			int slashoffset=slashloc-path+1;
+			int mkfold=0;
+			strlcpy(foldbuf,path+1,1024);
+			foldbuf[slashoffset-1]='\0'; //why? I guess the pointer is being advanced PAST the slash?
+			mkfold=mkdir(foldbuf,0700);
+			printf("Folderbuffer is: %s, status is: %d\n",foldbuf,mkfold);
+			if(mkfold==-1) {
+				perror("Here's why\n");
+			}
+			slashloc+=1;//iterate past the slash we're on
+		}
+		cachefile=fopen(path+1,"w+"); //should we force exclusive!?
+	}
+	if(!cachefile) {
+		char * uarehere=0;
+		printf("Could not create cache!!! FAIL\n");
+		perror("so I guess I can't makea no cachey\n");
+		uarehere=getcwd(0,0);
+		printf("You are here: %s\n",uarehere);
+		exit(1);
+	}
+	if(!feof(cachefile)) {
+		cachelen=fread(cacheheaders,1,65535,cachefile);
+	}
+	cacheheaders[cachelen]='\0'; //should also handle the case where the file didn't exist, and nothing was read.
+	rewind(cachefile);
+	
+	fetchheader(cacheheaders,"date",date,32); //this was the last time the content was fetched (or 0, which is 1/1/1970)
+	//e-tag? last-modified-since?
+
 	filebuffer=malloc(FILEMAX);
-	
-	webfetch(path,filebuffer,FILEMAX,"GET");
+	if(time(0) - parsedate(date) <= MAXCACHEAGE) {
+		void *filecursor=filebuffer;
+		printf("VALID CACHEFILE! \n");
+		while(!feof(cachefile)) {
+			char buffer[8192];
+			int bytesread=0;
+			bytesread=fread(buffer,1,8192,cachefile);
+			//printf("Iterazzione! bytes: %d, buffer: %s\n",bytesread,buffer);
+			//printf("\nENDA DE BUFFERO!\n");
+			memcpy(filecursor,buffer,bytesread);
+			filecursor+=bytesread;
+		}
+	} else {
+		printf("EEENVALEED cachefile!\n");
+		int totalbytes=webfetch(path,filebuffer,FILEMAX,"GET");
+		if(fetchstatus(filebuffer)==200) {
+			int writestat=0;
+			while(writestat<totalbytes) {
+				writestat+=write(fileno(cachefile),filebuffer+writestat,totalbytes-writestat);
+			}
+			if(writestat < totalbytes) {
+				printf("funky mismatch business writestat: %d, filemax: %d\n",writestat,FILEMAX);
+			}
+		}
+	}
+	fclose(cachefile);
+	printf("GODDAMMIT! HERe's filebuffer you SHTI! \n%s\nBLEAH",filebuffer);
 	fetchheader(filebuffer,"content-length",length,32);
 	int file_size=atoi(length);
 	//printf("File size: %d\n",file_size);
@@ -400,14 +493,25 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
     return size;
 }
 
+int	cachedir = 0;
+
+static void *
+crest_init(struct fuse_conn_info *conn)
+{
+	fchdir(cachedir);
+	close(cachedir);
+	return 0;
+}
+
 static struct fuse_operations crest_filesystem_operations = {
+	.init	 = crest_init,	  /* mostly to keep access to cache		*/
     .getattr = crest_getattr, /* To provide size, permissions, etc. */
     .open    = crest_open,    /* To enforce read-only access.       */
     .read    = crest_read,    /* To provide file content.           */
     .readdir = crest_readdir, /* To provide directory listing.      */
 };
 
-/* Test routines */
+/********************** Test routines **********************/
 
 void pathtest(char *fullpath)
 {
@@ -424,19 +528,17 @@ void hdrtest(char *header,char *name)
 	printf("Header name: %s: value: %s\n",name,pooh);
 }
 
-/* END TESTING */
-
-int
-main(int argc, char **argv)
+void pretest()
 {
 	char buf[DIRBUFFER];
-/*	pathtest("/desk.nu");
+	pathtest("/desk.nu");
 	pathtest("/desk.nu/pooh.html");
 	pathtest("/desk.nu/braydix");
 	pathtest("/desk.nu/braydix/");
-	exit(0); */
+	//exit(0);
 				
-/* 	if(status) {
+	//REGEX TESTING STUFF:
+ /*	if(status) {     
 		char error[80];
 		regerror(status,&re,error,80);
 		printf("error: %s\n",error);
@@ -453,6 +555,33 @@ main(int argc, char **argv)
 	hdrtest(buf,"content-type");
 	printf("Header status: %d\n",fetchstatus(buf));
 	printf("Lookit: %s\n",buf);
-	//exit(0);
-    return fuse_main(argc, argv, &crest_filesystem_operations, NULL);
+	exit(0);
+}
+
+/********************** END TESTING **********************/
+
+int
+main(int argc, char **argv)
+{
+	//visible USAGE: 	./crestfs /tmp/doodle [cachedir]
+	//pretest();
+	
+	//INVOKE AS: 	./crestfs /tmp/doodle -r -s -d -o nolocalcaches
+	char *myargs[]= {0, 0, "-r", "-s", "-d","-o","nolocalcaches", 0 };
+	// single user, read-only. NB!
+	
+	if(!(argc==2 || argc==3)) {
+		printf("Not right number of args, you gave me %d\n",argc);
+		printf("Usage: %s mountdir [cachedir] - if cachedir is not given will try to use current contents of mountdir before mount.\n",argv[0]);
+		exit(1);
+	}
+	printf("Decent. Arg count: %d\n",argc);
+	myargs[0]=argv[0];
+	myargs[1]=argv[1];
+	if(argc==3) {
+		cachedir= open(argv[2], O_RDONLY);
+	} else {
+		cachedir = open(argv[1], O_RDONLY);
+	}
+	return fuse_main(7, myargs, &crest_filesystem_operations, NULL);
 }
