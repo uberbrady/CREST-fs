@@ -13,11 +13,16 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <dirent.h>
+
 #include <regex.h>
 
 #define _FILE_OFFSET_BITS 64
 #define FUSE_USE_VERSION  26
 #include <fuse.h>
+
+#include <sys/time.h>
+
 
 
 /*************************/
@@ -56,7 +61,7 @@ pathparse(const char *path,char *hostname,char *pathonly,int hostlen,int pathlen
 	number of bytes in the header and contents together
 */
 int 
-webfetch(const char *path,char *buffer,int maxlength, char *verb)
+webfetch(const char *path,char *buffer,int maxlength, const char *verb)
 {
 	int sockfd, numbytes;  
 	struct addrinfo hints, *servinfo, *p;
@@ -153,11 +158,35 @@ reanswer(char *string,regmatch_t *re,char *buffer,int length)
 //be warned the headers may not be a nul-terminated string
 //so don't do stupid stuff like strlen(headers) because it 
 //may not work
+
+char mingie[65535]="";
+
+void manglefinder(char *string,int lineno)
+{
+	if(strcmp(mingie,"")==0) {
+		strlcpy(mingie,string,65535);
+	} else {
+		if(strcmp(string,mingie)!=0) {
+			printf("Mingie: %s\n",mingie);
+			printf("Mangled to: %s\n",string);
+			printf("Happend at line: %d\n",lineno);
+			exit(-1);
+		}
+	}
+}
+
+
+//#define MANGLETOK manglefinder(headers,__LINE__);
+#define MANGLETOK
+
 void
 fetchheader(char *headers,char *name,char *results,int length)
 {
 	char *cursor=headers;
 	int blanklinecount=0;
+	
+	mingie[0]='\0';
+	MANGLETOK;
 	while(cursor[0]!='\0') {
 		char *lineending=strstr(cursor,"\r\n"); //this is dangerous - cursor may not be null-terminated. But we're guaranteed to find \r\n
 												//somewhere, or else it's not valid HTTP protocol contents.
@@ -166,7 +195,7 @@ fetchheader(char *headers,char *name,char *results,int length)
 		//printf("SEARCHING FROM: CHARACTERS: %c %c %c %c %c\n",cursor[0],cursor[1],cursor[2],cursor[3],cursor[4]);
 		//printf("Line ENDING IS: %p, %s\n",lineending,lineending);
 		if(lineending==cursor) {
-			printf("LINEENDING IS CURSOR! I bet this doesn't happen\n");
+			//printf("LINEENDING IS CURSOR! I bet this doesn't happen\n");
 			break;
 			blanklinecount++;
 		} else {
@@ -175,39 +204,49 @@ fetchheader(char *headers,char *name,char *results,int length)
 			int linelen=0;
 
 			blanklinecount=0; //consecutive blank line counter must be reset
+			MANGLETOK
 			strlcpy(line,cursor,1024);
+			MANGLETOK
 			line[lineending-cursor]='\0';
-			printf("my line is: %s\n",line);
+			//printf("my line is: %s\n",line);
 			linelen=strlen(line);
 			colon=strchr(line,':');
 			if(colon) {
 				int keylen=colon-line;
 				//printf("Colon onwards is: %s keylen: %d\n",colon,keylen);
+				MANGLETOK
 				if(strncasecmp(name,line,keylen)==0) {
+					int nullen=0;
 					while(colon[1]==' ') {
 						//printf("advanced pointer once\n");
 						colon++;
 					}
-					//printf("colon+1: %s, length %d, strlen(line): %d\n",colon+1,linelen-keylen,linelen);
+					//printf("colon+1: %s, keylen %d, linelen: %d, linelen-keylen: %d, length!!! %d\n",colon+1,keylen,linelen,linelen-keylen,length);
 					strncpy(results,colon+1,linelen-keylen);
-					results[linelen-keylen+1]='\0';
+					nullen=linelen-keylen+1;
+					results[nullen>length-1 ? length-1 : nullen]='\0';
 					//printf("Well, results look like the will be: %s\n",results);
+					MANGLETOK
 					return;
 				}
 				//printf("line is: %s\n",line);
 			} else {
 				//printf("No colon found!!!!!!!!!\n");
+				MANGLETOK
 			}
 		}
-		printf("BLANK LINE COUNT IS: %d\n",blanklinecount);
+		//printf("BLANK LINE COUNT IS: %d\n",blanklinecount);
 		if(blanklinecount==2) {
 			break;
 		}
+		MANGLETOK
 		
 		cursor=lineending+2;//advance past the carriage-return,newline
 	}
+	MANGLETOK
 	//must not have found it or would've left already!
 	results[0]='\0';
+	MANGLETOK
 }
 
 int
@@ -231,19 +270,62 @@ parsedate(char *datestring)
 		return mktime(&mytime);
 	}
 }
+
+FILE *
+get_cachefile(const char *path,char *headers,int maxheaderlen)
+{
+	FILE *cachefile=fopen(path+1,"r+");
+	int cachelen=0;
+	if(!cachefile) {
+		//couldn't make the cachefile easily, check we've got folders
+		char *slashloc=(char *)path+1;
+		while((slashloc=strchr(slashloc,'/'))!=0) {
+			char foldbuf[1024];
+			int slashoffset=slashloc-path+1;
+			int mkfold=0;
+			strlcpy(foldbuf,path+1,1024);
+			foldbuf[slashoffset-1]='\0'; //why? I guess the pointer is being advanced PAST the slash?
+			mkfold=mkdir(foldbuf,0700);
+			printf("Folderbuffer is: %s, status is: %d\n",foldbuf,mkfold);
+			if(mkfold==-1) {
+				perror("Here's why\n");
+			}
+			slashloc+=1;//iterate past the slash we're on
+		}
+		cachefile=fopen(path+1,"w+"); //should we force exclusive!?
+	}
+	if(!cachefile) {
+		char * uarehere=0;
+		printf("Could not create cache for path %s!!! FAIL\n",path);
+		perror("so I guess I can't makea no cachey\n");
+		uarehere=getcwd(0,0);
+		printf("You are here: %s\n",uarehere);
+		printf("Path to dump %s\n",path+1);
+		exit(1);
+	}
+	if(!feof(cachefile)) {
+		cachelen=fread(headers,1,65535,cachefile);
+	}
+	headers[cachelen]='\0'; //should also handle the case where the file didn't exist, and nothing was read.
+	rewind(cachefile);
+	return cachefile;
+}
+
 /******************* END UTILITY FUNCTIONS< BEGIN ACTUALLY DOING OF STUFF!!!!! *********************/
 
 #define HEADERLEN 65535
+#define DIRCACHEFILE "/.crestfs_directory_cachenode"
 
 static int
 crest_getattr(const char *path, struct stat *stbuf)
 {
 	char header[HEADERLEN];
     memset(stbuf, 0, sizeof(struct stat));
+	header[0]='\0';
 
     if (strcmp(path, "/") == 0) { /* The root directory of our file system. */
         stbuf->st_mode = S_IFDIR | 0755;
-        stbuf->st_nlink = 2; //we could set this to '1' to force Find to be able to iterate...but not yet
+        stbuf->st_nlink = 1; //set this to '1' to force Find to be able to iterate
     } else {
 		char hostname[80];
 		char pathpart[1024];
@@ -251,11 +333,57 @@ crest_getattr(const char *path, struct stat *stbuf)
 		
 		if(strcmp(pathpart,"/")==0) {
 			//root of some host, MUST be a directory no matter what.
-			stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
+			stbuf->st_mode = S_IFDIR | 0755; //I am a a directory!
 			stbuf->st_nlink = 1; //use '1' to allow find(1) to decend within...					
 		} else {
 			char results[80];
-			webfetch(path,header,HEADERLEN,"HEAD");
+			struct stat cachestat;
+			char dircachepath[1024];
+			//first! Check cache
+			if(stat(path+1,&cachestat)==0) {
+				FILE *cachefile=0;
+				char date[80];
+				
+				printf("Stat successful for getattr, let's see if it's new enough...\n");
+				if(cachestat.st_mode & S_IFDIR ) {
+					//check the dircache file
+					printf("Cache file is a directory file, statting further...\n");
+					//NB - a directory 'stat' does NOT get cached.
+					//if you keep statting a directory over and over, but you never
+					//look at its contents, you will keep HEAD'ing it.
+					strlcpy(dircachepath,path+1,1024);
+					strlcat(dircachepath,DIRCACHEFILE,1024);
+					if(stat(dircachepath,&cachestat)==0 && cachestat.st_mtime>time(0)-MAXCACHEAGE) {
+						//recent enough cache, don't bother with the HEAD
+						stbuf->st_mode = S_IFDIR | 0755;
+						stbuf->st_nlink = 1;
+						return 0;
+					} else {
+						printf("old dircache file %s -refetching:/\n",dircachepath);
+					}
+				} else if (cachestat.st_mode & S_IFREG) {
+					//see if cached file is recent enough to use, if so, use it?
+					//_should_ be via 'date' field, but maybe we'll use the stat results
+					//we already have?
+					printf("Cache file is a FILE, fetching info on it...\n");
+					cachefile=get_cachefile(path,header,HEADERLEN);
+					fetchheader(header,"date",date,80);
+					fclose(cachefile);
+					printf("Cachefile age: %s, in seconds: %ld\n",date,time(0)-parsedate(date));
+					if(time(0) - parsedate(date) > MAXCACHEAGE) {
+						//it's too old, invalidate the header array so it will get picked up normally
+						printf("Cachefile too old!\n");
+						header[0]='\0';
+					}
+					//otherwise, we've pre-poulated 'header' with the CACHE header
+				} else {
+					printf("Dunno WHUT kind a file this is... %x\n",cachestat.st_mode);
+					exit(99);
+				}
+			}
+			if(strlen(header)==0) {
+				webfetch(path,header,HEADERLEN,"HEAD");
+			}
 			if(fetchstatus(header)>=400 && fetchstatus(header)<500) { //400, e.g., 404...
 				return -ENOENT;
 			}
@@ -271,19 +399,26 @@ crest_getattr(const char *path, struct stat *stbuf)
 				will ever be considered a directory - because there's nothing you can request _without_ the slash.
 			#3) I think that answeres my question. Root dir is always a dir. Otherwise do your test.
 			*/
+			
+			//printf("Headers we are working with: %s\n",header);
+			printf("Status: %d\n",fetchstatus(header));
 			if(fetchstatus(header)>=300 && fetchstatus(header)<400 && strlen(results)>0 && results[strlen(results)-1]=='/') {
+				printf("Uhm, ti's a directory?\n");
 				//e.g. - user has been redirected to a directory, then:
 				stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
 				stbuf->st_nlink = 1; //a lie, to allow find(1) to work.		
 			} else {
+				printf("It's a file\n");
 				char length[32];
 				char date[32];
 				stbuf->st_mode = S_IFREG | 0755;
+				//printf("Pre-mangulation headers: %s\n",header);
 				fetchheader(header,"last-modified",date,32);
-				//printf("Post-mangulation headers is: %s\n",header);
 				fetchheader(header,"content-length",length,32);
+				//printf("Post-mangulation headers is: %s\n",header+1);
 				//printf("Post-mangulation headers is: %s\n",header);
 				//printf("BTW, date I'm trying to format: %s\n",date);
+				printf("WEIRD...date: %s, length: %s\n",date,length);
 				stbuf->st_mtime = parsedate(date);
 				stbuf->st_size = atoi(length);
 			}
@@ -311,6 +446,17 @@ crest_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
+void touch(char *path)
+{
+	FILE *f;
+	char headers[65535];
+	f=get_cachefile(path,headers,65535);
+	int fw=fwrite("0",1,1,f);
+	int fu=futimes(fileno(f),0);
+	printf("I'mo touch something: %s, int: %d, fu: %d\n",path,fw,fu);
+	fclose(f);
+}
+
 #define DIRBUFFER	1*1024*1024
 // 1 MB
 
@@ -325,32 +471,46 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	int status=0;
 	int weboffset=0;
 	char slashpath[1024];
+	char dircachefile[1024];
+	struct stat statbuf;
+	int statresult=-1;
+	
+	strlcpy(dircachefile,path,1024); 
+	strlcat(dircachefile,DIRCACHEFILE,1024);
 	
 	strncpy(slashpath,path,1024);
 	strlcat(slashpath,"/",1024);
 	
-	path=slashpath;
-	
-	if (strcmp(path, "/") == 0) {
+	statresult=stat(dircachefile+1,&statbuf);
+	printf("Statresult: %d, st_mode | S_IFREG: %d, now: %d, mtime: %d, FULLCOMP: %d\n",statresult,statbuf.st_mode & S_IFREG,time(0),statbuf.st_mtime,(time(0)-statbuf.st_mtime <= MAXCACHEAGE));
+	if (strcmp(path, "/") == 0 || (statresult==0 && (statbuf.st_mode & S_IFREG) && (time(0)-statbuf.st_mtime <= MAXCACHEAGE))) {
+		DIR *mydir;
+		struct dirent *dp=0;
+		printf("GENERATING DIRECTORY LISTING FROM CACHE!!!\n");
+
+		if(strcmp(path,"/")==0) {
+			mydir=opendir(".");
+		} else {
+			mydir=opendir(path+1);
+		}
 		//we are exactly JUST the ROOT  dir
-		//in this case, we *MAY* want to walk through what we have cached and list that.
-	    filler(buf, ".", NULL, 0);           /* Current directory (.)  */
-	    filler(buf, "..", NULL, 0);          /* Parent directory (..)  */
-	    //filler(buf, "poopie+doops", NULL, 0); /* The only file we have...? */
-		//so, yeah, EVENTUALLY we want to walk through the cache directory
-		//and pick hostnames for which we have cached data. maybe.
+		//in this case, we want to walk through what we have cached and list that.
+		while((dp=readdir(mydir))!=0) {
+			filler(buf, dp->d_name, NULL, 0);
+		}
+		closedir(mydir);
 		return 0;
 	}
 	//pathparse(path,hostname,pathpart,HOSTLEN,PATHLEN);
-	
+		
 	dirbuffer=malloc(DIRBUFFER);
 	
-	webfetch(path,dirbuffer,DIRBUFFER,"GET");
+	webfetch(slashpath,dirbuffer,DIRBUFFER,"GET");
 	if(strlen(dirbuffer)==0) {
 		free(dirbuffer);
 		return -ENOENT;
 	}
-	printf("Fetchd: %s\n",dirbuffer);
+	//printf("Fetchd: %s\n",dirbuffer);
 	status=regcomp(&re,"<a[^>]href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>",REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
 	if(status!=0) {
 		char error[80];
@@ -375,7 +535,31 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			//printf("Link %s\n",linkname);
 			printf("href: %s link: %s\n",hrefname,linkname);
 			if(strcmp(hrefname,linkname)==0) {
-				filler(buf, hrefname, NULL, 0);
+				char chopslash[255];
+				char elempath[1024];
+				
+				printf("ELEMENT: %s\n",hrefname);
+				
+				strlcpy(elempath,path,1024);
+				strlcat(elempath,"/",1024);
+				
+				strlcpy(chopslash,hrefname,255);
+				if(chopslash[strlen(chopslash)-1]=='/') {
+					int dirmak=0;
+					chopslash[strlen(chopslash)-1]='\0';
+					strlcat(elempath,chopslash,1024);
+					printf("I want to try to make directory: %s\n",elempath);
+					dirmak=mkdir(elempath+1,0777);
+					if(dirmak==-1 && errno!= EEXIST ) {
+						printf("Fail to make directory for caching purposes! For shame! For shame!!!!\n");
+						exit(101);
+					}
+				} else {
+					strlcat(elempath,chopslash,1024);
+					printf("Making a file for directory-caching purposes: %s\n",elempath);
+					touch(elempath);
+				}
+				filler(buf, chopslash, NULL, 0);
 			}
 			weboffset+=rm[0].rm_eo;
 			printf("Weboffset: %d\n",weboffset);
@@ -389,7 +573,8 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	}
 	
 	free(dirbuffer);
-	
+	printf("Now I make the dircache: %s?\n",dircachefile); //LEADING SLAHSES OK!!!!
+	touch(dircachefile);
     return 0;
 }
 
@@ -404,45 +589,14 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	char length[32];
 	FILE *cachefile;
 	char cacheheaders[65535];
-	int cachelen=0; //if they're not in the first 64k, then too bad.
 	
 	char date[32];
 		
-	cachefile=fopen(path+1,"r+");
-	if(!cachefile) {
-		//couldn't make the cachefile easily, check we've got folders
-		char *slashloc=(char *)path+1;
-		while((slashloc=strchr(slashloc,'/'))!=0) {
-			char foldbuf[1024];
-			int slashoffset=slashloc-path+1;
-			int mkfold=0;
-			strlcpy(foldbuf,path+1,1024);
-			foldbuf[slashoffset-1]='\0'; //why? I guess the pointer is being advanced PAST the slash?
-			mkfold=mkdir(foldbuf,0700);
-			printf("Folderbuffer is: %s, status is: %d\n",foldbuf,mkfold);
-			if(mkfold==-1) {
-				perror("Here's why\n");
-			}
-			slashloc+=1;//iterate past the slash we're on
-		}
-		cachefile=fopen(path+1,"w+"); //should we force exclusive!?
-	}
-	if(!cachefile) {
-		char * uarehere=0;
-		printf("Could not create cache!!! FAIL\n");
-		perror("so I guess I can't makea no cachey\n");
-		uarehere=getcwd(0,0);
-		printf("You are here: %s\n",uarehere);
-		exit(1);
-	}
-	if(!feof(cachefile)) {
-		cachelen=fread(cacheheaders,1,65535,cachefile);
-	}
-	cacheheaders[cachelen]='\0'; //should also handle the case where the file didn't exist, and nothing was read.
-	rewind(cachefile);
-	
+	cachefile=get_cachefile(path,cacheheaders,65535);
 	fetchheader(cacheheaders,"date",date,32); //this was the last time the content was fetched (or 0, which is 1/1/1970)
 	//e-tag? last-modified-since?
+	
+	printf("I'm getting a file %s for which the cache date is: %s\n",path,date);
 
 	filebuffer=malloc(FILEMAX);
 	if(time(0) - parsedate(date) <= MAXCACHEAGE) {
@@ -471,7 +625,7 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 		}
 	}
 	fclose(cachefile);
-	printf("GODDAMMIT! HERe's filebuffer you SHTI! \n%s\nBLEAH",filebuffer);
+	//printf("GODDAMMIT! HERe's filebuffer you SHTI! \n%s\nBLEAH",filebuffer);
 	fetchheader(filebuffer,"content-length",length,32);
 	int file_size=atoi(length);
 	//printf("File size: %d\n",file_size);
@@ -531,10 +685,10 @@ void hdrtest(char *header,char *name)
 void pretest()
 {
 	char buf[DIRBUFFER];
-	pathtest("/desk.nu");
+/*	pathtest("/desk.nu");
 	pathtest("/desk.nu/pooh.html");
 	pathtest("/desk.nu/braydix");
-	pathtest("/desk.nu/braydix/");
+	pathtest("/desk.nu/braydix/"); */
 	//exit(0);
 				
 	//REGEX TESTING STUFF:
@@ -549,10 +703,12 @@ void pretest()
 	regfree(&re); */
 	
 	webfetch("/desk.nu/braydix",buf,DIRBUFFER,"HEAD");
+	hdrtest(buf,"connection");
 	hdrtest(buf,"Scheissen");
 	hdrtest(buf,"etag");
 	hdrtest(buf,"date");
 	hdrtest(buf,"content-type");
+	hdrtest(buf,"sErVeR");
 	printf("Header status: %d\n",fetchstatus(buf));
 	printf("Lookit: %s\n",buf);
 	exit(0);
@@ -564,7 +720,7 @@ int
 main(int argc, char **argv)
 {
 	//visible USAGE: 	./crestfs /tmp/doodle [cachedir]
-	//pretest();
+	////////////pretest();
 	
 	//INVOKE AS: 	./crestfs /tmp/doodle -r -s -d -o nolocalcaches
 	char *myargs[]= {0, 0, "-r", "-s", "-d","-o","nolocalcaches", 0 };
@@ -582,6 +738,9 @@ main(int argc, char **argv)
 		cachedir= open(argv[2], O_RDONLY);
 	} else {
 		cachedir = open(argv[1], O_RDONLY);
+	}
+	if(cachedir==-1) {
+		printf("%d no open cachedir\n",cachedir);
 	}
 	return fuse_main(7, myargs, &crest_filesystem_operations, NULL);
 }
