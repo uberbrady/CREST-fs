@@ -192,6 +192,10 @@ fetchheader(char *headers,char *name,char *results,int length)
 												//somewhere, or else it's not valid HTTP protocol contents.
 												//we may need to change this out for \n in case we have invalid servers
 												//out there somewhere...
+		if(lineending==0) {
+			printf("Couldn't find a CRLF pair, bailing out of fetchheader()!\n");
+			break;
+		}
 		//printf("SEARCHING FROM: CHARACTERS: %c %c %c %c %c\n",cursor[0],cursor[1],cursor[2],cursor[3],cursor[4]);
 		//printf("Line ENDING IS: %p, %s\n",lineending,lineending);
 		if(lineending==cursor) {
@@ -336,7 +340,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 			stbuf->st_mode = S_IFDIR | 0755; //I am a a directory!
 			stbuf->st_nlink = 1; //use '1' to allow find(1) to decend within...					
 		} else {
-			char results[80];
+			char results[1024];
 			struct stat cachestat;
 			char dircachepath[1024];
 			//first! Check cache
@@ -388,7 +392,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 				return -ENOENT;
 			}
 			//printf("Headers fetched: %s",header);
-			fetchheader(header,"Location",results,80);
+			fetchheader(header,"Location",results,1024);
 			//printf("Location found? %s\n",results);
 			//so - question - how do we determine the 'type' of this file - 
 			//e.g. is it a directory? or a file?
@@ -403,12 +407,12 @@ crest_getattr(const char *path, struct stat *stbuf)
 			//printf("Headers we are working with: %s\n",header);
 			printf("Status: %d\n",fetchstatus(header));
 			if(fetchstatus(header)>=300 && fetchstatus(header)<400 && strlen(results)>0 && results[strlen(results)-1]=='/') {
-				printf("Uhm, ti's a directory?\n");
+				printf("Uhm, %s is a directory?\n",results);
 				//e.g. - user has been redirected to a directory, then:
 				stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
 				stbuf->st_nlink = 1; //a lie, to allow find(1) to work.		
 			} else {
-				printf("It's a file\n");
+				printf("%s is a file, strlen %d, status: %d\n",results,strlen(results),fetchstatus(header));
 				char length[32];
 				char date[32];
 				stbuf->st_mode = S_IFREG | 0755;
@@ -460,6 +464,8 @@ void touch(char *path)
 #define DIRBUFFER	1*1024*1024
 // 1 MB
 
+#define TOOMANYFILES 10000
+
 static int
 crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
               off_t offset, struct fuse_file_info *fi)
@@ -475,6 +481,8 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	struct stat statbuf;
 	int statresult=-1;
 	
+	bzero(rm,sizeof(rm));
+	
 	strlcpy(dircachefile,path,1024); 
 	strlcat(dircachefile,DIRCACHEFILE,1024);
 	
@@ -486,6 +494,8 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	if (strcmp(path, "/") == 0 || (statresult==0 && (statbuf.st_mode & S_IFREG) && (time(0)-statbuf.st_mtime <= MAXCACHEAGE))) {
 		DIR *mydir;
 		struct dirent *dp=0;
+		char dircacheskip[1024];
+		strlcpy(dircacheskip,DIRCACHEFILE,1024);//CONTAINS the leading slash! Gotta make sure to skip it when you use it.
 		printf("GENERATING DIRECTORY LISTING FROM CACHE!!!\n");
 
 		if(strcmp(path,"/")==0) {
@@ -496,6 +506,13 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		//we are exactly JUST the ROOT  dir
 		//in this case, we want to walk through what we have cached and list that.
 		while((dp=readdir(mydir))!=0) {
+			if(strcmp(dp->d_name,dircacheskip+1)==0) { //need to skip the leading '/' in DIRCACHEFILE
+				//we don't want to display the DIRCACHEFILE's as if they are valid contents - they aren't!
+				//they're just an internal marker. This also becomes a good way to tell the difference between
+				//a cache directory and a live-mount directory - you can only see the DIRCACHEFILE's in the
+				//cache directory, they won't show up in the live directory
+				continue;
+			}
 			filler(buf, dp->d_name, NULL, 0);
 		}
 		closedir(mydir);
@@ -521,12 +538,14 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
     filler(buf, ".", NULL, 0);           /* Current directory (.)  */
     filler(buf, "..", NULL, 0);          /* Parent directory (..)  */
 	int failcounter=0;
-	while(status==0 && failcounter < 100) {
+	while(status==0 && failcounter < TOOMANYFILES) {
 		failcounter++;
-		
-		status=regexec(&re,dirbuffer+weboffset,3,rm,0); // ???
 		char hrefname[255];
 		char linkname[255];
+		
+		weboffset+=rm[0].rm_eo;
+		printf("Weboffset: %d\n",weboffset);
+		status=regexec(&re,dirbuffer+weboffset,3,rm,0); // ???
 		if(status==0) {
 			reanswer(dirbuffer+weboffset,&rm[1],hrefname,255);
 			reanswer(dirbuffer+weboffset,&rm[2],linkname,255);
@@ -537,7 +556,8 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			if(strcmp(hrefname,linkname)==0) {
 				char chopslash[255];
 				char elempath[1024];
-				
+				struct stat nodestat;
+
 				printf("ELEMENT: %s\n",hrefname);
 				
 				strlcpy(elempath,path,1024);
@@ -548,6 +568,17 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 					int dirmak=0;
 					chopslash[strlen(chopslash)-1]='\0';
 					strlcat(elempath,chopslash,1024);
+					
+					if(stat(elempath,&nodestat)) {
+						if (nodestat.st_mode & S_IFREG) {
+							printf("Cache sub-node already exists, but it exists as a file when it should be a directory, so I'm going to delete it\n");
+							unlink(elempath);
+						}
+						if (nodestat.st_mode & S_IFDIR) {
+							printf("Cache sub-node already exists, as a directory. going to next node!\n");
+							continue;
+						}
+					}				
 					printf("I want to try to make directory: %s\n",elempath);
 					dirmak=mkdir(elempath+1,0777);
 					if(dirmak==-1 && errno!= EEXIST ) {
@@ -557,18 +588,29 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 				} else {
 					strlcat(elempath,chopslash,1024);
 					printf("Making a file for directory-caching purposes: %s\n",elempath);
+					if(stat(elempath,&nodestat)) {
+						if(nodestat.st_mode & S_IFREG) {
+							printf("File cache-node already exists, skipping...\n");
+							continue;
+						}
+						if(nodestat.st_mode & S_IFDIR) {
+							printf("CRAP. sub-cache node exists, but is a directory, not a file. I coudl try to unlink it...\n");
+							if(rmdir(elempath)!=0) {
+								printf("Unable to remove directory - probably because it's not empty: %s\n",elempath);
+								exit(189);
+							}
+						}
+					}
 					touch(elempath);
 				}
 				filler(buf, chopslash, NULL, 0);
 			}
-			weboffset+=rm[0].rm_eo;
-			printf("Weboffset: %d\n",weboffset);
 		}
 		//printf("staus; %d, 0: %d, 1:%d, 2: %d, href=%s, link=%s\n",status,rm[0].rm_so,rm[1].rm_so,rm[2].rm_so,hrefname,linkname);
 		//filler?
 		//filler(buf,rm[])
 	}
-	if(failcounter>=100) {
+	if(failcounter>=TOOMANYFILES) {
 		printf("Fail due to toomany\n");
 	}
 	
