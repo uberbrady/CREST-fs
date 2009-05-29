@@ -275,8 +275,10 @@ parsedate(char *datestring)
 	}
 }
 
+//path will look like "/domainname.com/directoryname/file" - with leading slash
+
 FILE *
-get_cachefile(const char *path,char *headers,int maxheaderlen)
+get_cacheelem(const char *path,char *headers,int maxheaderlen)
 {
 	FILE *cachefile=fopen(path+1,"r+");
 	int cachelen=0;
@@ -307,12 +309,36 @@ get_cachefile(const char *path,char *headers,int maxheaderlen)
 		printf("Path to dump %s\n",path+1);
 		exit(1);
 	}
-	if(!feof(cachefile)) {
+	if(cachefile && !feof(cachefile) && headers) {
 		cachelen=fread(headers,1,65535,cachefile);
+		printf("Reading into cache... %d bytes\n",cachelen);
 	}
-	headers[cachelen]='\0'; //should also handle the case where the file didn't exist, and nothing was read.
+	if(headers) {
+		headers[cachelen]='\0'; //should also handle the case where the file didn't exist, and nothing was read.
+	}
 	rewind(cachefile);
 	return cachefile;
+}
+
+#define METAPREPEND		"/.crestfs_metadata_rootnode"
+#define METALEN 1024
+
+void get_cachefiles(const char *path,FILE **header,FILE **data,void *headbuf,int bufferlen)
+{
+	char metafilename[METALEN];
+	
+	//for the metafilename, we need to transform from:
+	//   /domainname.com/dirname/filename
+	//TO:
+	//	 /.crestfs_metadata_rootnode/domainname.com/dirname/filename
+	
+	strcpy(metafilename,METAPREPEND);
+	strlcat(metafilename,path,METALEN);
+	
+//	*metafile=fopen(metafilename,"r+");
+	
+	*header=get_cacheelem(metafilename,headbuf,bufferlen);
+	*data=get_cacheelem(path,0,0);
 }
 
 /******************* END UTILITY FUNCTIONS< BEGIN ACTUALLY DOING OF STUFF!!!!! *********************/
@@ -329,14 +355,16 @@ crest_getattr(const char *path, struct stat *stbuf)
 
     if (strcmp(path, "/") == 0) { /* The root directory of our file system. */
         stbuf->st_mode = S_IFDIR | 0755;
-        stbuf->st_nlink = 1; //set this to '1' to force Find to be able to iterate
+        stbuf->st_nlink = 1; //set this to '1' to force find(1) to be able to iterate
     } else {
 		char hostname[80];
 		char pathpart[1024];
 		pathparse(path,hostname,pathpart,80,1024);
+		FILE *cachefile=0;
+		FILE *headerfile=0;
 		
 		if(strcmp(pathpart,"/")==0) {
-			//root of some host, MUST be a directory no matter what.
+			//root of a host, MUST be a directory no matter what.
 			stbuf->st_mode = S_IFDIR | 0755; //I am a a directory!
 			stbuf->st_nlink = 1; //use '1' to allow find(1) to decend within...					
 		} else {
@@ -345,16 +373,12 @@ crest_getattr(const char *path, struct stat *stbuf)
 			char dircachepath[1024];
 			//first! Check cache
 			if(stat(path+1,&cachestat)==0) {
-				FILE *cachefile=0;
 				char date[80];
 				
 				printf("Stat successful for getattr, let's see if it's new enough...\n");
 				if(cachestat.st_mode & S_IFDIR ) {
-					//check the dircache file
+					//now check the dircache file
 					printf("Cache file is a directory file, statting further...\n");
-					//NB - a directory 'stat' does NOT get cached.
-					//if you keep statting a directory over and over, but you never
-					//look at its contents, you will keep HEAD'ing it.
 					strlcpy(dircachepath,path+1,1024);
 					strlcat(dircachepath,DIRCACHEFILE,1024);
 					if(stat(dircachepath,&cachestat)==0 && cachestat.st_mtime>time(0)-MAXCACHEAGE) {
@@ -369,10 +393,12 @@ crest_getattr(const char *path, struct stat *stbuf)
 					//see if cached file is recent enough to use, if so, use it?
 					//_should_ be via 'date' field, but maybe we'll use the stat results
 					//we already have?
-					printf("Cache file is a FILE, fetching info on it...\n");
-					cachefile=get_cachefile(path,header,HEADERLEN);
+					
+					printf("Cache file on behalf of path: %s is a FILE, fetching info on it...\n",path);
+					get_cachefiles(path,&headerfile,&cachefile,header,HEADERLEN); //MAKE SURE TO CLOSE THESE!!!!!!!
+					printf("Header info is: %s\n",header);
+					printf("headerfile: %p, cachefile: %p\n",headerfile,cachefile);
 					fetchheader(header,"date",date,80);
-					fclose(cachefile);
 					printf("Cachefile age: %s, in seconds: %ld\n",date,time(0)-parsedate(date));
 					if(time(0) - parsedate(date) > MAXCACHEAGE) {
 						//it's too old, invalidate the header array so it will get picked up normally
@@ -389,6 +415,8 @@ crest_getattr(const char *path, struct stat *stbuf)
 				webfetch(path,header,HEADERLEN,"HEAD");
 			}
 			if(fetchstatus(header)>=400 && fetchstatus(header)<500) { //400, e.g., 404...
+				fclose(cachefile);
+				fclose(headerfile);
 				return -ENOENT;
 			}
 			//printf("Headers fetched: %s",header);
@@ -412,7 +440,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 				stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
 				stbuf->st_nlink = 1; //a lie, to allow find(1) to work.		
 			} else {
-				printf("%s is a file, strlen %d, status: %d\n",results,strlen(results),fetchstatus(header));
+				printf("%s is a file, strlen %d, status: %d\n",results,(int)strlen(results),fetchstatus(header));
 				char length[32];
 				char date[32];
 				stbuf->st_mode = S_IFREG | 0755;
@@ -425,8 +453,16 @@ crest_getattr(const char *path, struct stat *stbuf)
 				printf("WEIRD...date: %s, length: %s\n",date,length);
 				stbuf->st_mtime = parsedate(date);
 				stbuf->st_size = atoi(length);
+				if(strlen(length)==0) {
+					//zero byte file, 'read' will *never* get called on it, so it will *never* cache properly.
+					int writestatus=fwrite(header,1,strlen(header),headerfile);
+					
+					printf("STatus of your write is: %d\n",writestatus);
+				}
 			}
 		}
+		fclose(headerfile);
+		fclose(cachefile);
     }
 
     return 0;
@@ -454,7 +490,7 @@ void touch(char *path)
 {
 	FILE *f;
 	char headers[65535];
-	f=get_cachefile(path,headers,65535);
+	f=get_cacheelem(path,headers,65535);
 	int fw=fwrite("0",1,1,f);
 	int fu=futimes(fileno(f),0);
 	printf("I'mo touch something: %s, int: %d, fu: %d\n",path,fw,fu);
@@ -490,7 +526,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	strlcat(slashpath,"/",1024);
 	
 	statresult=stat(dircachefile+1,&statbuf);
-	printf("Statresult: %d, st_mode | S_IFREG: %d, now: %d, mtime: %d, FULLCOMP: %d\n",statresult,statbuf.st_mode & S_IFREG,time(0),statbuf.st_mtime,(time(0)-statbuf.st_mtime <= MAXCACHEAGE));
+	printf("Statresult: %d, st_mode | S_IFREG: %d, now: %d, mtime: %d, FULLCOMP: %d\n",statresult,statbuf.st_mode & S_IFREG,(int)time(0),(int)statbuf.st_mtime,(time(0)-statbuf.st_mtime <= MAXCACHEAGE));
 	if (strcmp(path, "/") == 0 || (statresult==0 && (statbuf.st_mode & S_IFREG) && (time(0)-statbuf.st_mtime <= MAXCACHEAGE))) {
 		DIR *mydir;
 		struct dirent *dp=0;
@@ -627,16 +663,20 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
            struct fuse_file_info *fi)
 {
 	char *filebuffer=0;
-	char *headerend=0;
+	//char *headerend=0;
 	char length[32];
 	FILE *cachefile;
+	FILE *headerfile;
 	char cacheheaders[65535];
+	char *headerend=0;
 	
 	char date[32];
 		
-	cachefile=get_cachefile(path,cacheheaders,65535);
+	get_cachefiles(path,&headerfile,&cachefile,cacheheaders,65535);
 	fetchheader(cacheheaders,"date",date,32); //this was the last time the content was fetched (or 0, which is 1/1/1970)
 	//e-tag? last-modified-since?
+	
+	printf("CACHE HEADERS ARE: %s\n",cacheheaders);
 	
 	printf("I'm getting a file %s for which the cache date is: %s\n",path,date);
 
@@ -644,6 +684,15 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	if(time(0) - parsedate(date) <= MAXCACHEAGE) {
 		void *filecursor=filebuffer;
 		printf("VALID CACHEFILE! \n");
+		while(!feof(headerfile)) {
+			char buffer[8192];
+			int bytesread=0;
+			bytesread=fread(buffer,1,8192,headerfile);
+			//printf("Iterazzione! bytes: %d, buffer: %s\n",bytesread,buffer);
+			//printf("\nENDA DE BUFFERO!\n");
+			memcpy(filecursor,buffer,bytesread);
+			filecursor+=bytesread;
+		}
 		while(!feof(cachefile)) {
 			char buffer[8192];
 			int bytesread=0;
@@ -658,20 +707,41 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 		int totalbytes=webfetch(path,filebuffer,FILEMAX,"GET");
 		if(fetchstatus(filebuffer)==200) {
 			int writestat=0;
-			while(writestat<totalbytes) {
-				writestat+=write(fileno(cachefile),filebuffer+writestat,totalbytes-writestat);
+			int hdrstat=0;
+			int hdrbytes=0;
+			char *headerend=strstr(filebuffer,"\r\n\r\n");
+			int contentbytes=0;
+			char lengthbuffer[32];
+			fetchheader(filebuffer,"Content-length",lengthbuffer,32);
+			contentbytes=atoi(lengthbuffer);
+			if(headerend==0) {
+				//invalid HTML?
+				printf("Bad HTML (no headers)\n");
+				exit(-1);
+			}
+			hdrbytes=headerend-filebuffer+4;
+			printf("HEADER BYTES CALCULATED TO BE: %d\n",hdrbytes);
+			while(hdrstat<hdrbytes) {
+				hdrstat+=write(fileno(headerfile),filebuffer+hdrstat,hdrbytes-hdrstat);
+			}
+			printf("HEADER I WROTE: %d bytes!\n",hdrstat);
+			headerend+=4;
+			while(writestat<contentbytes) {
+				writestat+=write(fileno(cachefile),headerend+writestat,contentbytes-writestat);
 			}
 			if(writestat < totalbytes) {
 				printf("funky mismatch business writestat: %d, filemax: %d\n",writestat,FILEMAX);
 			}
 		}
 	}
+	fclose(headerfile);
 	fclose(cachefile);
-	//printf("GODDAMMIT! HERe's filebuffer you SHTI! \n%s\nBLEAH",filebuffer);
+	//printf("GODDAMMIT! HERe's filebuffer you dummy! \n%s\nBLEAH",filebuffer);
 	fetchheader(filebuffer,"content-length",length,32);
 	int file_size=atoi(length);
-	//printf("File size: %d\n",file_size);
+	printf("File size: %d\n",file_size);
 	headerend=strstr(filebuffer,"\r\n\r\n");
+	//headerend=filebuffer;
 	headerend+=4;
 	//printf("Header end is: %s\n",headerend);
 

@@ -3,7 +3,7 @@
 
 
 crestfs: crestfs.c
-	gcc -g -Wall -o crestfs crestfs.c -lfuse
+	gcc -g -Wall -Werror -o crestfs crestfs.c -lfuse
 	
 test: crestfs
 	mkdir -p /tmp/doodle
