@@ -1,4 +1,6 @@
 /* For more information, see http://www.macdevcenter.com/pub/a/mac/2007/03/06/macfuse-new-frontiers-in-file-systems.html. */ 
+
+
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -20,7 +22,6 @@
 #define _FILE_OFFSET_BITS 64
 #define FUSE_USE_VERSION  26
 #include <fuse.h>
-
 #include <sys/time.h>
 
 
@@ -30,6 +31,47 @@
 #define MAXCACHEAGE		3600*2
 //we may want this to be configurable in future - a command line option perhaps
 /*************************/
+
+//BSD-isms we have to replicate (puke, puke)
+
+#ifdef __linux__
+int 
+strlcat(char *dest, const char * src, int size)
+{
+	strncat(dest,src,size-1);
+	return strlen(dest);
+}
+
+int
+strlcpy(char *dest,const char *src, int size)
+{
+	int initialsrc=strlen(src);
+	int bytes=0;
+	if(initialsrc>size-1) {
+		bytes=size-1;
+	} else {
+		bytes=initialsrc;
+	}
+	//printf("Chosen byteS: %d, initial src: %d\n",bytes,initialsrc);
+	strncpy(dest,src,bytes);
+	dest[bytes]='\0';
+	
+	return initialsrc;
+}
+
+#include <stdarg.h>
+int
+asprintf(char **ret, const char *format, ...)
+{
+	va_list v;
+	*ret=malloc(32767);
+	
+	va_start(v,format);
+	return vsnprintf(*ret,32767,format,v);
+}
+
+char * strptime(char *,char *,struct tm *);
+#endif
 void
 pathparse(const char *path,char *hostname,char *pathonly,int hostlen,int pathlen)
 {
@@ -360,8 +402,6 @@ crest_getattr(const char *path, struct stat *stbuf)
 		char hostname[80];
 		char pathpart[1024];
 		pathparse(path,hostname,pathpart,80,1024);
-		FILE *cachefile=0;
-		FILE *headerfile=0;
 		
 		if(strcmp(pathpart,"/")==0) {
 			//root of a host, MUST be a directory no matter what.
@@ -371,6 +411,8 @@ crest_getattr(const char *path, struct stat *stbuf)
 			char results[1024];
 			struct stat cachestat;
 			char dircachepath[1024];
+			FILE *cachefile=0;
+			FILE *headerfile=0;
 			//first! Check cache
 			if(stat(path+1,&cachestat)==0) {
 				char date[80];
@@ -460,9 +502,15 @@ crest_getattr(const char *path, struct stat *stbuf)
 					printf("STatus of your write is: %d\n",writestatus);
 				}
 			}
+			if(headerfile)
+				fclose(headerfile);
+			else
+				printf("TRY TO CLOSE NO HEADERFILE!\n");
+			if(cachefile)
+				fclose(cachefile);
+			else
+				printf("TRY TO CLOSE NO CACHEFILE!\n");
 		}
-		fclose(headerfile);
-		fclose(cachefile);
     }
 
     return 0;
@@ -500,7 +548,7 @@ void touch(char *path)
 #define DIRBUFFER	1*1024*1024
 // 1 MB
 
-#define TOOMANYFILES 10000
+#define TOOMANYFILES 200
 
 static int
 crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
@@ -526,12 +574,24 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	strlcat(slashpath,"/",1024);
 	
 	statresult=stat(dircachefile+1,&statbuf);
-	printf("Statresult: %d, st_mode | S_IFREG: %d, now: %d, mtime: %d, FULLCOMP: %d\n",statresult,statbuf.st_mode & S_IFREG,(int)time(0),(int)statbuf.st_mtime,(time(0)-statbuf.st_mtime <= MAXCACHEAGE));
+
+	printf("readdir: %s ",path);
+	printf("Statresult: %d, ",statresult);
+	printf("st_mode | S_IFREG: %d, ",statbuf.st_mode & S_IFREG);
+	printf("now: %ld, ",time(0));
+	printf("mtime: %ld, ",statbuf.st_mtime);
+	printf("FULLCOMP: %d\n",(time(0)-statbuf.st_mtime <= MAXCACHEAGE));
+	
+	printf("OFFSET? %ld\n",offset);
+
 	if (strcmp(path, "/") == 0 || (statresult==0 && (statbuf.st_mode & S_IFREG) && (time(0)-statbuf.st_mtime <= MAXCACHEAGE))) {
 		DIR *mydir;
 		struct dirent *dp=0;
 		char dircacheskip[1024];
+		char metacacheskip[1024];
+
 		strlcpy(dircacheskip,DIRCACHEFILE,1024);//CONTAINS the leading slash! Gotta make sure to skip it when you use it.
+		strlcpy(metacacheskip,METAPREPEND,1024);
 		printf("GENERATING DIRECTORY LISTING FROM CACHE!!!\n");
 
 		if(strcmp(path,"/")==0) {
@@ -539,23 +599,40 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		} else {
 			mydir=opendir(path+1);
 		}
-		//we are exactly JUST the ROOT  dir
-		//in this case, we want to walk through what we have cached and list that.
+		//seekdir(mydir,offset);
+
+		//either we are exactly JUST the ROOT  dir OR we have a cache to read from
+		//in either case, we want to walk through what we have cached and list that.
 		while((dp=readdir(mydir))!=0) {
-			if(strcmp(dp->d_name,dircacheskip+1)==0) { //need to skip the leading '/' in DIRCACHEFILE
+			struct stat entry;
+			memset(&entry,0,sizeof(entry));
+			printf("entry: '%s', vs. '%s' or '%s'\n",dp->d_name,dircacheskip+1,metacacheskip+1);
+			if(strcmp(dp->d_name,dircacheskip+1)==0 || strcmp(dp->d_name,metacacheskip+1)==0) { //need to skip the leading '/' in DIRCACHEFILE
 				//we don't want to display the DIRCACHEFILE's as if they are valid contents - they aren't!
 				//they're just an internal marker. This also becomes a good way to tell the difference between
 				//a cache directory and a live-mount directory - you can only see the DIRCACHEFILE's in the
 				//cache directory, they won't show up in the live directory
+				printf("skipping my own crap in the directory\n");
 				continue;
 			}
-			filler(buf, dp->d_name, NULL, 0);
+			
+			printf("Directory Entry being added: '%s'\n",dp->d_name);
+			entry.st_ino=dp->d_ino;
+			entry.st_mode = dp->d_type << 12;
+			if(filler(buf, dp->d_name, NULL, 0)) 
+				break; 
 		}
+/*   	filler(buf, ".", NULL, 0);
+	filler(buf, "..", NULL, 0);
+	filler(buf, "Doodie", NULL, 0);
+	filler(buf, "DooDoo", NULL, 0);
+	return 0; */
+
 		closedir(mydir);
 		return 0;
 	}
 	//pathparse(path,hostname,pathpart,HOSTLEN,PATHLEN);
-		
+	printf("SKIP SKIP SKIP CACHE - DO GET STUFF INSTAED!!!\n");
 	dirbuffer=malloc(DIRBUFFER);
 	
 	webfetch(slashpath,dirbuffer,DIRBUFFER,"GET");
@@ -596,8 +673,8 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 				printf("ELEMENT: %s\n",hrefname);
 				
-				strlcpy(elempath,path,1024);
-				strlcat(elempath,"/",1024);
+				strlcpy(elempath,path,1024); // TOTAL GUESS! This looks like it's WRONG FIXME
+				strlcat(elempath,"/",1024); //then slash, then...
 				
 				strlcpy(chopslash,hrefname,255);
 				if(chopslash[strlen(chopslash)-1]=='/') {
@@ -605,7 +682,9 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 					chopslash[strlen(chopslash)-1]='\0';
 					strlcat(elempath,chopslash,1024);
 					
-					if(stat(elempath,&nodestat)) {
+					printf("DIR ELEM PATH: %s\n",elempath);
+					
+					if(stat(elempath,&nodestat)==0) {
 						if (nodestat.st_mode & S_IFREG) {
 							printf("Cache sub-node already exists, but it exists as a file when it should be a directory, so I'm going to delete it\n");
 							unlink(elempath);
@@ -618,13 +697,13 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 					printf("I want to try to make directory: %s\n",elempath);
 					dirmak=mkdir(elempath+1,0777);
 					if(dirmak==-1 && errno!= EEXIST ) {
-						printf("Fail to make directory for caching purposes! For shame! For shame!!!!\n");
+						printf("Fail to make directory for caching purposes! For shame! For shame!!!! (Reason: %d), means: %s\n",errno,strerror(errno));
 						exit(101);
 					}
 				} else {
 					strlcat(elempath,chopslash,1024);
 					printf("Making a file for directory-caching purposes: %s\n",elempath);
-					if(stat(elempath,&nodestat)) {
+					if(stat(elempath,&nodestat)==0) {
 						if(nodestat.st_mode & S_IFREG) {
 							printf("File cache-node already exists, skipping...\n");
 							continue;
@@ -794,6 +873,32 @@ void hdrtest(char *header,char *name)
 	printf("Header name: %s: value: %s\n",name,pooh);
 }
 
+void strtest()
+{
+	char buffera[32];
+	char bufferb[32];
+	char bufferc[64];
+	int result=0;
+
+	result=strlcpy(bufferb,"Hello",32);
+	printf("strlcpy: %s, %d",bufferb,result);
+	
+	
+	
+	result=strlcpy(buffera,"HelloHelloHelloHelloHelloHelloHello",32);
+	printf("strlcpy: %s, %d",buffera,result);
+	
+	result= strlcat(bufferc,buffera,64);
+	printf("Strlcat: %s, %d",bufferc,result);
+
+	result= strlcat(bufferc,buffera,64);
+	printf("strlcat: %s, %d",bufferc,result);
+
+	result= strlcat(bufferc,buffera,64);
+	printf("strlcat: %s, %d",bufferc,result);
+}
+
+
 void pretest()
 {
 	char buf[DIRBUFFER];
@@ -823,6 +928,8 @@ void pretest()
 	hdrtest(buf,"sErVeR");
 	printf("Header status: %d\n",fetchstatus(buf));
 	printf("Lookit: %s\n",buf);
+	
+	strtest();
 	exit(0);
 }
 
@@ -832,10 +939,17 @@ int
 main(int argc, char **argv)
 {
 	//visible USAGE: 	./crestfs /tmp/doodle [cachedir]
-	////////////pretest();
+//	pretest();
 	
 	//INVOKE AS: 	./crestfs /tmp/doodle -r -s -d -o nolocalcaches
-	char *myargs[]= {0, 0, "-r", "-s", "-d","-o","nolocalcaches", 0 };
+	#ifdef __APPLE__
+	char *myargs[]= {0, 0, "-r", "-s", "-f", "-d","-o","nolocalcaches", 0 };
+	#define ARGCOUNT 8
+	#else
+	char *myargs[]= {0, 0, "-r", "-s", "-f", "-d", 0 };
+	#define ARGCOUNT 6
+	#endif
+	
 	// single user, read-only. NB!
 	
 	if(!(argc==2 || argc==3)) {
@@ -854,5 +968,5 @@ main(int argc, char **argv)
 	if(cachedir==-1) {
 		printf("%d no open cachedir\n",cachedir);
 	}
-	return fuse_main(7, myargs, &crest_filesystem_operations, NULL);
+	return fuse_main(ARGCOUNT, myargs, &crest_filesystem_operations, NULL);
 }
