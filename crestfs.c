@@ -191,7 +191,7 @@ webfetch(const char *path,char *buffer,int maxlength, const char *verb)
     brintf("client: connecting to %s\n", s);
 */
 	freeaddrinfo(servinfo); // all done with this structure
-	asprintf(&reqstr,"%s %s HTTP/1.0\r\nHost: %s\r\n\r\n",verb,pathstub,hostname);
+	asprintf(&reqstr,"%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: CREST-fs/0.2\r\n\r\n",verb,pathstub,hostname);
 	brintf("REQUEST: %s\n",reqstr);
 	send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
