@@ -1,9 +1,33 @@
 
 
+#gcc=/root/buildroot-2009.05/build_i686/staging_dir/usr/i686-linux/bin/gcc
+
+PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/
+
+gcc=i686-linux-uclibc-gcc
 
 
-crestfs: crestfs.c
-	gcc -g -Wall -Werror -o crestfs crestfs.c -lfuse
+#PATH="/root/buildroot-2009.05/build_i686/staging_dir/usr/i686-linux-uclibc/bin/:$PATH"
+
+.PHONY: ALL
+
+ALL: crestfs.static #crestfs 
+
+
+crestfs.static: crestfs.c Makefile crestfs.static.o
+	$(gcc) -static -g -Wall -Werror -o crestfs.static crestfs.static.o libfuse.a -lpthread -ldl
+
+crestfs.static.o: crestfs.c Makefile
+	$(gcc) -g -Wall -Werror -idirafter /usr/include/fuse -c -o crestfs.static.o crestfs.c
+
+crestfs: crestfs.o Makefile
+	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
+	gcc -g -Wall -Werror -o crestfs crestfs.o -lfuse
+	#gcc -static -g -Wall -Werror -o crestfs.static crestfs.o -lfuse
+
+crestfs.o: crestfs.c Makefile
+	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
+	gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	
 test: crestfs
 	umount /tmp/doodle
@@ -13,4 +37,3 @@ test: crestfs
 
 debug: crestfs
 	gdb --args ./crestfs /tmp/doodle /tmp/cachetest
-	
