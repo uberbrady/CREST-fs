@@ -674,7 +674,7 @@ void touch(char *path)
 	FILE *f;
 	char headers[65535];
 	f=get_cacheelem(path,headers,65535);
-	int fw=fwrite("0",1,1,f);
+	int fw=fwrite("",0,1,f);
 	int fu=utime(path,0);
 	brintf("I'mo touch something: %s, int: %d, fu: %d\n",path,fw,fu);
 	fclose(f);
