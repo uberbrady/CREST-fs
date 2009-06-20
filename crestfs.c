@@ -428,6 +428,44 @@ void get_cachefiles(const char *path,FILE **header,FILE **data,void *headbuf,int
 	*data=get_cacheelem(path,0,0);
 }
 
+/*** Directory Cache functionality ***/
+
+int dircacheentries=0;
+struct dircacheentry {
+	char *path;
+	time_t	when;
+	struct stat st;
+};
+
+#define DIRCACHESIZE 128
+
+struct dircacheentry dircache[128];
+
+struct stat *finddircache(const char *path)
+{
+	int i;
+	for(i=0;i<dircacheentries;i++) {
+		if(strcmp(dircache[i].path,path)==0) {
+			return &(dircache[i].st);
+		}
+	}
+	return 0;
+}
+
+void	insertdircache(const char *path,struct stat *st)
+{
+	if(dircacheentries>=DIRCACHESIZE) {
+		//no more directory cache entries for you right now
+		//later we will do something clever with finding the
+		//oldest entry and getting rid. but for now, just do nothing.
+		return;
+	}
+	dircache[dircacheentries].path=strdup(path);
+	dircache[dircacheentries].when=time(0);
+	memcpy(&(dircache[dircacheentries].st),st,sizeof(struct stat));
+	dircacheentries++;
+}
+
 /******************* END UTILITY FUNCTIONS< BEGIN ACTUALLY DOING OF STUFF!!!!! *********************/
 
 #define HEADERLEN 65535
@@ -457,9 +495,21 @@ crest_getattr(const char *path, struct stat *stbuf)
 			char results[1024];
 			struct stat cachestat;
 			char dircachepath[1024];
+			struct stat *dircachestat;
 			FILE *cachefile=0;
 			FILE *headerfile=0;
 			int statstatus=0;
+			//zeroth: check dir STAT cache
+			dircachestat=finddircache(path);
+			if(dircachestat) {
+				if((dircachestat->st_mode & S_IFMT) == 0) {
+					//NAK stat
+					return -ENOENT;
+				} else {
+					memcpy(stbuf,dircachestat,sizeof(struct stat));
+					return 0;
+				}
+			}
 			//first! Check cache
 			if(stat(path+1,&cachestat)==0) {
 				char date[80];
@@ -475,6 +525,9 @@ crest_getattr(const char *path, struct stat *stbuf)
 						//recent enough cache, don't bother with the HEAD
 						stbuf->st_mode = S_IFDIR | 0755;
 						stbuf->st_nlink = 1;
+						///you got this from the cached files
+						//don't need to cache this in the fast 
+						//dircache
 						return 0;
 					} else {
 						brintf("old dircache file %s -refetching:/\n",dircachepath);
@@ -510,9 +563,12 @@ crest_getattr(const char *path, struct stat *stbuf)
 				// this means, nobody's fetched, or if they
 				// did fetch, the network's down or not working
 				if(fetchstatus(header)>=400 && fetchstatus(header)<500) { //400, e.g., 404...
+					struct stat blankstat;
+					memset(&blankstat,0,sizeof(struct stat));
 					brintf("nonexistent file, so sayeth the Server. Obey.\n");
 					if(cachefile) fclose(cachefile);
 					if(headerfile) fclose(headerfile);
+					insertdircache(path,&blankstat);
 					return -ENOENT;
 				}
 				//brintf("Headers fetched: %s",header);
@@ -536,6 +592,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 					//e.g. - user has been redirected to a directory, then:
 					stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
 					stbuf->st_nlink = 1; //a lie, to allow find(1) to work.		
+					insertdircache(path,stbuf); //cache this please
 				} else {
 					brintf("%s is a file, strlen %d, status: %d\n",results,(int)strlen(results),fetchstatus(header));
 					char length[32];
