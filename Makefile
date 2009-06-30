@@ -2,7 +2,7 @@
 
 #gcc=/root/buildroot-2009.05/build_i686/staging_dir/usr/i686-linux/bin/gcc
 
-PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/
+PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/:/usr/bin/:/bin/:/sbin:/usr/sbin
 
 gcc=i686-linux-uclibc-gcc
 
@@ -29,11 +29,11 @@ crestfs.o: crestfs.c Makefile
 	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	
-test: crestfs
-	umount /tmp/doodle
+test: crestfs.static
+	#umount /tmp/doodle
 	mkdir -p /tmp/doodle
 	mkdir -p /tmp/cachetest
-	./crestfs /tmp/doodle /tmp/cachetest &> /tmp/garbage
+	strace -o /tmp/straceo ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f &> /tmp/garbage
 
-debug: crestfs
+debug: crestfs.static
 	gdb --args ./crestfs /tmp/doodle /tmp/cachetest

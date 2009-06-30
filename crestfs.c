@@ -31,7 +31,8 @@
 
 /*************************/
 // Important #define's which describe all behavior as a whole
-#define MAXCACHEAGE		3600*2
+//#define MAXCACHEAGE		3600*2
+#define MAXCACHEAGE		60
 //we may want this to be configurable in future - a command line option perhaps
 /*************************/
 
@@ -123,7 +124,7 @@ int networkmode=0;
 #include <resolv.h>
 
 int 
-webfetch(const char *path,char *buffer,int maxlength, const char *verb)
+webfetch(const char *path,char *buffer,int maxlength, const char *verb,char *etag)
 {
 	int sockfd, numbytes;  
 	struct addrinfo hints, *servinfo, *p;
@@ -132,11 +133,19 @@ webfetch(const char *path,char *buffer,int maxlength, const char *verb)
 	char pathstub[PATHLEN];
 	char *reqstr=0;
 	int bytessofar=0;
+	char etagheader[1024]="";
 //	char *origbuffer=buffer;
 //	struct stat flagstat;
 	memset(&hints, 0, sizeof hints);
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
+	
+	etagheader[0]='\0';
+	if(strcmp(etag,"")!=0) {
+		strcpy(etagheader,"If-None-Match: ");
+		strlcat(etagheader,etag,1024);
+		strlcat(etagheader,"\r\n",1024);
+	}
 	
 /*	if(stat(flagfilename,&flagstat)!=0) {
 		brintf("Networking not enabled via %s yet\n",flagfilename);
@@ -191,7 +200,7 @@ webfetch(const char *path,char *buffer,int maxlength, const char *verb)
     brintf("client: connecting to %s\n", s);
 */
 	freeaddrinfo(servinfo); // all done with this structure
-	asprintf(&reqstr,"%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: CREST-fs/0.2\r\n\r\n",verb,pathstub,hostname);
+	asprintf(&reqstr,"%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: CREST-fs/0.2\r\n%s\r\n",verb,pathstub,hostname,etagheader);
 	brintf("REQUEST: %s\n",reqstr);
 	send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
@@ -200,7 +209,7 @@ webfetch(const char *path,char *buffer,int maxlength, const char *verb)
 	while ((numbytes = recv(sockfd, buffer, FETCHBLOCK-1, 0)) >0 && bytessofar <= maxlength) {
 		//keep going
 		bytessofar+=numbytes;
-		buffer+=numbytes;
+		buffer=(buffer+numbytes);
 	}
 	if(numbytes<0) {
 		brintf("Error - %d\n",numbytes);
@@ -223,7 +232,6 @@ webfetch(const char *path,char *buffer,int maxlength, const char *verb)
 
 	return bytessofar;
 }
-
 
 void
 reanswer(char *string,regmatch_t *re,char *buffer,int length)
@@ -517,11 +525,14 @@ crest_getattr(const char *path, struct stat *stbuf)
 				statstatus=1;
 				brintf("Stat successful for getattr, let's see if it's new enough...\n");
 				if(cachestat.st_mode & S_IFDIR ) {
+					struct stat metastat;
+					
+					memset(&metastat,0,sizeof(metastat));
 					//now check the dircache file
 					brintf("Cache file is a directory file, statting further...\n");
 					strlcpy(dircachepath,path+1,1024);
 					strlcat(dircachepath,DIRCACHEFILE,1024);
-					if(stat(dircachepath,&cachestat)==0 && cachestat.st_mtime>time(0)-MAXCACHEAGE) {
+					if(stat(dircachepath,&metastat)==0 && metastat.st_mtime>time(0)-MAXCACHEAGE) {
 						//recent enough cache, don't bother with the HEAD
 						stbuf->st_mode = S_IFDIR | 0755;
 						stbuf->st_nlink = 1;
@@ -556,9 +567,9 @@ crest_getattr(const char *path, struct stat *stbuf)
 				}
 			}
 			if(strlen(header)==0) {
-				st=webfetch(path,header,HEADERLEN,"HEAD");
+				st=webfetch(path,header,HEADERLEN,"HEAD","");
 			}
-			
+			brintf("webfetch returns: %d\n",st);
 			if(st!=0) {
 				// this means, nobody's fetched, or if they
 				// did fetch, the network's down or not working
@@ -619,6 +630,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 				//and by virtue of the 'else', 
 				//NO Bytes were fetched...
 				//let's use that STAT
+				brintf("statstatus is one, try to returns stale cache info\n");
 				if(cachestat.st_mode & S_IFDIR) {
 					stbuf->st_mode = S_IFDIR | 0755;
 					stbuf->st_nlink = 1;
@@ -635,6 +647,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 					return 0;
 				}
 			} else {
+				brintf("no files stat'ed, no internet to grab data from, i give up. no such file.\n");
 				return -ENOENT;
 			}
 			if(headerfile)
@@ -689,7 +702,7 @@ void touch(char *path)
 
 int
 crest_readdir_from_web(const char *path, void *buf, fuse_fill_dir_t filler,
-              off_t offset, struct fuse_file_info *fi,char *dircachefile)
+              off_t offset, struct fuse_file_info *fi)
 {
 	char *dirbuffer=0;
 
@@ -704,15 +717,23 @@ crest_readdir_from_web(const char *path, void *buf, fuse_fill_dir_t filler,
 	strlcat(slashpath,"/",1024);
 
 	memset(rm,0,sizeof(rm));
+	
+	//filler
+	if(offset!=0) {
+		brintf("You're asking for funky offset business - I'm dying\n");
+		//exit(19);
+	}
 
 	brintf("SKIP SKIP SKIP CACHE - DO GET STUFF INSTAED!!!\n");
 	dirbuffer=malloc(DIRBUFFER);
 	
-	webfetch(slashpath,dirbuffer,DIRBUFFER,"GET");
+	
+	webfetch(slashpath,dirbuffer,DIRBUFFER,"GET","");
 	if(strlen(dirbuffer)==0) {
 		free(dirbuffer);
 		return NOWEBS;
 	}
+	//return 0; //OKAY, but EMPTY!
 	//we don't currently handle redirects (30x)
 	//nor (100 Continue)
 	//otherwise this would just say > 399 (would mean 400 or 500 errors)
@@ -728,9 +749,12 @@ crest_readdir_from_web(const char *path, void *buf, fuse_fill_dir_t filler,
 		//this is systemic failure, unmount and die.
 		exit(-1);
 	}
-    filler(buf, ".", NULL, 0);           /* Current directory (.)  */
-    filler(buf, "..", NULL, 0);          /* Parent directory (..)  */
+	//return 0; //empty directory
 	int failcounter=0;
+    if(offset<++failcounter) filler(buf, ".", NULL, failcounter); /* Current directory (.)  */
+    if(offset<++failcounter) filler(buf, "..", NULL, failcounter);          /* Parent directory (..)  */
+    //if(offset<++failcounter) filler(buf,"poople",NULL,failcounter);
+    //return 0; //infinite loop?
 	while(status==0 && failcounter < TOOMANYFILES) {
 		failcounter++;
 		char hrefname[255];
@@ -800,19 +824,25 @@ crest_readdir_from_web(const char *path, void *buf, fuse_fill_dir_t filler,
 					}
 					touch(elempath);
 				}
-				filler(buf, chopslash, NULL, 0);
+				if(offset<failcounter) 
+					if(filler(buf, chopslash, NULL, failcounter)!=0) {
+						brintf("Filler said not zero.\n");
+						break;
+					}
 			}
 		}
 		//brintf("staus; %d, 0: %d, 1:%d, 2: %d, href=%s, link=%s\n",status,rm[0].rm_so,rm[1].rm_so,rm[2].rm_so,hrefname,linkname);
 		//filler?
 		//filler(buf,rm[])
 	}
+	brintf("while loop - complete\n");
 	if(failcounter>=TOOMANYFILES) {
 		brintf("Fail due to toomany\n");
 	}
 	free(dirbuffer);
-	brintf("Now I make the dircache: %s?\n",dircachefile); //LEADING SLAHSES OK!!!!
-	touch(dircachefile);
+	//brintf("Now I make the dircache: %s?\n",dircachefile); //LEADING SLAHSES OK!!!!
+	//return 0; //STILL HERE FINE!!!!!!!!!!!!
+	//touch(dircachefile);
 	return 0; //success? or does that mean fail?
 }
 
@@ -846,12 +876,16 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 	//if (strcmp(path, "/") == 0 || (statresult==0 && (statbuf.st_mode & S_IFREG) && (time(0)-statbuf.st_mtime <= MAXCACHEAGE))) {
 	if (!(strcmp(path, "/") == 0 || (statresult==0 && (statbuf.st_mode & S_IFREG) && (time(0)-statbuf.st_mtime <= MAXCACHEAGE)))) {
-		int resultstatus=crest_readdir_from_web(path,buf,filler,offset,fi,dircachefile);
+		int resultstatus=crest_readdir_from_web(path,buf,filler,offset,fi);
 		//getting a '401 - gone' is NOT the same as the web being down
 		//the server says the page DOES NOT EXIST. the server MUST
 		//be respected.
 		if(resultstatus==0 || resultstatus==-ENOENT) {
+			brintf("crest_readdir_from_web is finished and is returning\n");
+			touch(dircachefile); //? WILL THIS CRASH IT?!
 			return resultstatus;
+		} else {
+			brintf("Funny results from crest_readdir_from_web: %d",resultstatus);
 		}
 	}
 
@@ -884,8 +918,10 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			brintf("Directory Entry being added: '%s'\n",dp->d_name);
 			entry.st_ino=dp->d_ino;
 			entry.st_mode = dp->d_type << 12;
-			if(filler(buf, dp->d_name, NULL, 0)) 
+			if(filler(buf, dp->d_name, NULL, 0)!=0) {
+				brintf("Filler from cachedir says not zero. break.\n");
 				break; 
+			}
 		}
 	}
 	/*filler(buf, ".", NULL, 0);
@@ -910,28 +946,32 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	FILE *cachefile;
 	FILE *headerfile;
 	char cacheheaders[65535];
+	char etag[65535];
 	char *headerend=0;
 	
 	char date[32];
 	int file_size=0;
-	void *filecursor;
+	
+	int returnedbytes=0;
+
 	get_cachefiles(path,&headerfile,&cachefile,cacheheaders,65535);
 	fetchheader(cacheheaders,"date",date,32); //this was the last time the content was fetched (or 0, which is 1/1/1970)
+	fetchheader(cacheheaders,"etag",etag,32);
 	//e-tag? last-modified-since?
 	
 	brintf("CACHE HEADERS ARE: %s\n",cacheheaders);
 	
 	brintf("I'm getting a file %s for which the cache date is: %s\n",path,date);
 
-	filebuffer=malloc(FILEMAX);
 	if(time(0) - parsedate(date) > MAXCACHEAGE) {
-		brintf("EEENVALEED cachefile!\n");
-		int totalbytes=webfetch(path,filebuffer,FILEMAX,"GET");
+		filebuffer=malloc(FILEMAX);
+		brintf("OLD cachefile!\n");
+		int totalbytes=webfetch(path,filebuffer,FILEMAX,"GET",etag);
 		if(fetchstatus(filebuffer)==200) {
 			int writestat=0;
 			int hdrstat=0;
 			int hdrbytes=0;
-			char *headerend=strstr(filebuffer,"\r\n\r\n");
+			headerend=strstr(filebuffer,"\r\n\r\n");
 			int contentbytes=0;
 			char lengthbuffer[32];
 			fetchheader(filebuffer,"Content-length",lengthbuffer,32);
@@ -947,38 +987,134 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 				hdrstat+=write(fileno(headerfile),filebuffer+hdrstat,hdrbytes-hdrstat);
 			}
 			brintf("HEADER I WROTE: %d bytes!\n",hdrstat);
+			//re-fill 'cacheheaders'
+			memcpy(cacheheaders,filebuffer,hdrbytes);
+			cacheheaders[hdrbytes]='\0';
+			
 			headerend+=4;
 			while(writestat<contentbytes) {
 				writestat+=write(fileno(cachefile),headerend+writestat,contentbytes-writestat);
 			}
-			if(writestat < totalbytes) {
-				brintf("funky mismatch business writestat: %d, filemax: %d\n",writestat,FILEMAX);
+			if(writestat < contentbytes) {
+				brintf("funky mismatch business writestat: %d, contentbytes: %d, totalbyes: %d, filemax: %d\n",writestat,contentbytes,totalbytes,FILEMAX);
 			}
+			rewind(headerfile);
+			rewind(cachefile);
 		}
-		if(fetchstatus(filebuffer)>399 &&fetchstatus(filebuffer)<600) {
+		if(fetchstatus(filebuffer)==304) {
+			//write the new header
+			//because we don't want to check the server AGAIN
+			//next time until at least MAXCACHEAGE
+			fwrite(filebuffer,1,strlen(filebuffer)+1,headerfile);
+			ftruncate(fileno(headerfile),strlen(filebuffer)+1);
+			rewind(headerfile);
+		}
+		if(fetchstatus(filebuffer)>399 && fetchstatus(filebuffer)<600) {
+			free(filebuffer);
+			if(headerfile) fclose(headerfile);
+			if(cachefile) fclose(cachefile);
 			return -ENOENT;
 		}
+		free(filebuffer);
 	}
-	if(headerend==0) { //this would only happen if nothing has been so far loaded
+	
+	//okay, reiterate where we are at:
+	
+	//we either have a good cache, or we refreshed it and made it good
+	//otherwise, we got no file
+	
+	//if the internet was down and the server didn't tell us definitively
+	//that there was no file, how can we know?
+	//well, the cachefile will be empty, and so will be the header?
+	
+	fetchheader(cacheheaders,"content-length",length,32);
+	if(strlen(length)==0) {
+		//no content-length header;
+		//either this is 304'ed content or we ahve
+		//an unprimed cache. Try to go by cachefile filesize
+		struct stat cachestat;
+		
+		if(fstat(fileno(cachefile),&cachestat)) {
+			brintf("Couldn't even stat content file...assuming nonexistent\n");
+			if(headerfile) fclose(headerfile);
+			if(cachefile) fclose(cachefile);
+			return -ENOENT;
+		}
+		file_size=cachestat.st_size;
+	} else {
+		file_size=atoi(length);
+	}
+	
+	if (offset >= file_size) { /* Trying to read past the end of file. */
+		if(headerfile) fclose(headerfile);
+		if(cachefile) fclose(cachefile);
+		return 0;
+	}
+
+	if (offset + size > file_size) { /* Trim the read to the file size. */
+		size = file_size - offset;
+	}
+
+	if(fseek(cachefile,offset,SEEK_SET)==-1) {
+		//cannot seek to point in file!
+		brintf("Seek off end of file, dying: %s.\n",strerror(errno));
+		exit(57);
+	}
+	returnedbytes = fread(buf,1,size,cachefile);
+	fclose(headerfile);
+	fclose(cachefile);
+	return returnedbytes;
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+#if 0	
+	if(headerend==0 || fetchstatus(filebuffer)==304) {
+		//this would only happen if nothing has been so far loaded
+		//or if the Etags match OK, meaning our content is 'ok'
 		filecursor=filebuffer;
-		brintf("VALID CACHEFILE! ...or internet is down and we have no choice \n");
+		brintf("VALID CACHEFILE! ...or internet is down and we have no choice...or etags say its ok (status: %d) \n",fetchstatus(filebuffer));
 		while(!feof(headerfile)) {
 			char buffer[8192];
 			int bytesread=0;
 			bytesread=fread(buffer,1,8192,headerfile);
 			//brintf("Iterazzione! bytes: %d, buffer: %s\n",bytesread,buffer);
 			//brintf("\nENDA DE BUFFERO!\n");
-			memcpy(filecursor,buffer,bytesread);
-			filecursor+=bytesread;
+			if(bytesread>0) {
+				memcpy(filecursor,buffer,bytesread);
+				filecursor=(filecursor+bytesread);
+			} else {
+				brintf("Error reading from header: %s\n",strerror(errno));
+				break;
+			}
+		}
+		if(filecursor!=filebuffer) {
+			//we read SOMETHING for the cache headers
+			//remove the trailing NUL at the end of the headers, pls
+			//back up one char.
+			filecursor-=1;
 		}
 		while(!feof(cachefile)) {
 			char buffer[8192];
 			int bytesread=0;
 			bytesread=fread(buffer,1,8192,cachefile);
+			if(bytesread==-1) {
+				brintf("Error reading from cache file: %s\n",strerror(errno));
+				//this shouldn't happen; if the file doesn't exist, we
+				//shouldn't even get here.
+				exit(14);
+			}
 			//brintf("Iterazzione! bytes: %d, buffer: %s\n",bytesread,buffer);
 			//brintf("\nENDA DE BUFFERO!\n");
+			brintf("Reading %d bytes and copying them to filebuffer\n",bytesread);
 			memcpy(filecursor,buffer,bytesread);
-			filecursor+=bytesread;
+			filecursor=(filecursor+bytesread);
 		}
 	}
 	fclose(headerfile);
@@ -991,11 +1127,22 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 		//headerend=filebuffer;
 		headerend+=4;
 	} else {
-		brintf("Empty length detected - guessing via data\n");
-		file_size=filecursor-(void *)filebuffer;
-		headerend=filebuffer;
+		char *rnrn=strstr(filebuffer,"\r\n\r\n");
+		//this could be un-primed cache (cache without header info)
+		//or not-modified header info (HTTP status 304)
+		brintf("Empty length detected - guessing via cache data\n");
+		file_size=cachesize.st_size;
+		if(rnrn) {
+			brintf("Found end-of-headers, using that to determine start of data\n");
+			headerend=rnrn+4;
+		} else {
+			//no end of headers, must be unprimed cache?
+			brintf("No end-of-headers. Assuming all I have is data.\n");
+			headerend=filebuffer;
+		}
 	}
 	brintf("File size: %d\n",file_size);
+	//brintf("First char: %c, last char??: %c\n",headerend[0],headerend[file_size]);
 	//brintf("Header end is: %s\n",headerend);
 
 	if (offset >= file_size) { /* Trying to read past the end of file. */
@@ -1010,6 +1157,7 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	memcpy(buf, headerend + offset, size); /* Provide the content. */
 	free(filebuffer);
 	return size;
+#endif
 }
 
 int	cachedir = 0;
@@ -1093,7 +1241,7 @@ void pretest()
 	exit(0);
 	regfree(&re); */
 	
-	webfetch("/desk.nu/braydix",buf,DIRBUFFER,"HEAD");
+	webfetch("/desk.nu/braydix",buf,DIRBUFFER,"HEAD","");
 	hdrtest(buf,"connection");
 	hdrtest(buf,"Scheissen");
 	hdrtest(buf,"etag");
