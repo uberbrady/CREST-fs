@@ -33,6 +33,11 @@
 // Important #define's which describe all behavior as a whole
 //#define MAXCACHEAGE		3600*2
 #define MAXCACHEAGE		60
+
+//global variable (another one is down there but it's use is jsut there.
+char rootdir[1024]="";
+
+
 //we may want this to be configurable in future - a command line option perhaps
 /*************************/
 
@@ -78,6 +83,8 @@ char * strptime(char *,char *,struct tm *);
 #else
 #include <stdarg.h>
 #endif
+
+/* utility functions for debugging, path parsing, fetching, etc. */
 
 void brintf(char *format,...)
 {
@@ -387,6 +394,14 @@ void redirmake(const char *path)
 FILE *
 get_cacheelem(const char *path,char *headers,int maxheaderlen)
 {
+	//there is a possibility that the 'file' that we're opening is not a file, after all, if so - return 0 so we don't try to write to it
+	//specifically, this seems to happen with SYMLINKS
+	struct stat precheck;
+	lstat(path+1,&precheck);
+	if(!(precheck.st_mode & S_IFREG)) {
+		//if you're a FIFO, a directory, or a symlink - anything other than 'plain-jane file', return 0;
+		return 0;
+	}
 	FILE *cachefile=fopen(path+1,"r+");
 	int cachelen=0;
 	if(!cachefile) {
@@ -405,13 +420,16 @@ get_cacheelem(const char *path,char *headers,int maxheaderlen)
 		}
 	}
 	if(cachefile && !feof(cachefile) && headers) {
-		cachelen=fread(headers,1,65535,cachefile);
+		cachelen=fread(headers,1,maxheaderlen,cachefile);
 		brintf("Reading into cache... %d bytes\n",cachelen);
 	}
 	if(headers) {
+		brintf("headers are not zero, cachelen is: %d\n",cachelen);
 		headers[cachelen]='\0'; //should also handle the case where the file didn't exist, and nothing was read.
 	}
+	brintf("going to rewind cachefile\n");
 	rewind(cachefile);
+	brintf("returning\n");
 	return cachefile;
 }
 
@@ -519,12 +537,18 @@ crest_getattr(const char *path, struct stat *stbuf)
 				}
 			}
 			//first! Check cache
-			if(stat(path+1,&cachestat)==0) {
+			brintf("going to be statting: %s\n",path+1);
+			if(lstat(path+1,&cachestat)==0) {
 				char date[80];
 				
 				statstatus=1;
 				brintf("Stat successful for getattr, let's see if it's new enough...\n");
-				if(cachestat.st_mode & S_IFDIR ) {
+				if (S_ISLNK(cachestat.st_mode)) {
+					brintf("seems to be a link: %s...\n",path);
+					stbuf->st_mode = S_IFLNK | 0755;
+					stbuf->st_nlink = 1;
+					return 0;
+				} else if(S_ISDIR(cachestat.st_mode)) {
 					struct stat metastat;
 					
 					memset(&metastat,0,sizeof(metastat));
@@ -541,9 +565,9 @@ crest_getattr(const char *path, struct stat *stbuf)
 						//dircache
 						return 0;
 					} else {
-						brintf("old dircache file %s -refetching:/\n",dircachepath);
+						brintf("old dircache file %s -refetching.\n",dircachepath);
 					}
-				} else if (cachestat.st_mode & S_IFREG) {
+				} else if (S_ISREG(cachestat.st_mode)) {
 					//see if cached file is recent enough to use, if so, use it?
 					//_should_ be via 'date' field, but maybe we'll use the stat results
 					//we already have?
@@ -561,7 +585,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 					}
 					//otherwise, we've pre-populated 'header' with the CACHE header
 				} else {
-					//brintf("Dunno WHUT kind a file this is... %x\n",cachestat.st_mode);
+					brintf("Dunno WHUT kind a file this is... %x\n",cachestat.st_mode);
 					//exit(99);
 					return -ENOENT; //no special files allowed
 				}
@@ -596,14 +620,23 @@ crest_getattr(const char *path, struct stat *stbuf)
 				*/
 				
 				//brintf("Headers we are working with: %s\n",header);
-				brintf("Status: %d\n",fetchstatus(header));
-				if(fetchstatus(header)>=300 && fetchstatus(header)<400 
-				   && strlen(results)>0 && results[strlen(results)-1]=='/') {
-					brintf("Uhm, %s is a directory?\n",results);
-					//e.g. - user has been redirected to a directory, then:
-					stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
-					stbuf->st_nlink = 1; //a lie, to allow find(1) to work.		
-					insertdircache(path,stbuf); //cache this please
+				int httpstatus=fetchstatus(header);
+				brintf("Status: %d\n",httpstatus);
+				if(httpstatus==301 || httpstatus==302 || httpstatus==303 || httpstatus==307) {
+					//http redirect, means either DIRECTORY or SYMLINK
+					//start out by keeping it simple - if it ends in a
+					//slash, it's a directory.
+					if(strlen(results)>0 && results[strlen(results)-1]=='/') {
+						brintf("Uhm, %s is a directory?\n",results);
+						//e.g. - user has been redirected to a directory, then:
+						stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
+						stbuf->st_nlink = 1; //a lie, to allow find(1) to work.		
+						insertdircache(path,stbuf); //cache this please
+					} else {
+						//ZERO caching attempts, to start with...
+						stbuf->st_mode = S_IFLNK;
+						stbuf->st_nlink = 1;
+					}
 				} else {
 					brintf("%s is a file, strlen %d, status: %d\n",results,(int)strlen(results),fetchstatus(header));
 					char length[32];
@@ -665,6 +698,39 @@ crest_getattr(const char *path, struct stat *stbuf)
 }
 
 static int
+crest_readlink(const char *path, char * buf, size_t bufsize)
+{
+	//we'll start with the assumption this actuallly IS a symlink.
+	char hostname[80];
+	char pathpart[1024];
+	char location[4096]="";
+	char header[HEADERLEN];
+	int st=0;
+	pathparse(path,hostname,pathpart,80,1024);
+	
+	st=webfetch(path,header,HEADERLEN,"HEAD","");
+	fetchheader(header,"Location",location,4096);
+	
+	//from an http://www.domainname.com/path/stuff/whatever
+	//we must get to a local path.
+	if(strncmp(location,"http://",7)!=0) {
+		brintf("Unsupported protocol, or missing 'location' header: %s\n",location);
+		return -ENOENT;
+	}
+	strlcpy(buf,rootdir,bufsize); //fs 'root'
+	strlcat(buf,"/",bufsize);
+	strlcat(buf,location+7,bufsize);
+	
+	brintf("I would love to unlink: %s, and point it to: %s\n",path+1,buf);
+	//int unlinkstat=unlink(path+1);
+	//int linkstat=symlink(buf,path+1);
+	
+	//brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
+	
+	return 0;
+}
+
+static int
 crest_open(const char *path, struct fuse_file_info *fi)
 {
 //	if (strcmp(path, file_path) != 0) { /* We only recognize one file. */
@@ -698,50 +764,86 @@ void touch(char *path)
 
 #define TOOMANYFILES 200
 
-#define NOWEBS	-2147483647
-
-int
-crest_readdir_from_web(const char *path, void *buf, fuse_fill_dir_t filler,
+static int
+crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
               off_t offset, struct fuse_file_info *fi)
 {
-	char *dirbuffer=0;
+	char dircachefile[1024];
+	FILE *dirfile=0;
+	char headers[8196];
+	char date[80];
 
+	//should do a directory listing in the domains directory (the first one)
+	// but let's do that later.
+	
+	if(strcmp(path,"/")==0) {
+		brintf("PATH IS /!!!!!\n");
+		DIR *mydir;
+		struct dirent *dp;
+		int id=1;
+		
+		mydir=opendir(".");
+		while((dp=readdir(mydir))!=0) {
+			brintf("Potential dir is: %s, id: %d (vs offset: %d)\n",dp->d_name,id,offset);
+			if(id>offset) {
+				if(filler(buf,dp->d_name,NULL,id)!=0) {
+					break;
+				}
+			}
+			id++;
+		}
+		brintf("Done with dir listing, returning...");
+		return 0;
+	}
+
+	char *dirbuffer=malloc(DIRBUFFER);
+	dirbuffer[0]='\0';
+	
 	regex_t re;
 	regmatch_t rm[3];
-	int status=0;
-	int weboffset=0;
 	
-	char slashpath[1024];
+	strlcpy(dircachefile,path,1024); 
+	strlcat(dircachefile,DIRCACHEFILE,1024);
 
-	strncpy(slashpath,path,1024);
-	strlcat(slashpath,"/",1024);
-
-	memset(rm,0,sizeof(rm));
+	brintf("Dircachefile: %s\n",dircachefile);	
+	dirfile=get_cacheelem(dircachefile,headers,8196);
+	fetchheader(headers,"Date",date,80);
 	
-	//filler
-	if(offset!=0) {
-		brintf("You're asking for funky offset business - I'm dying\n");
-		//exit(19);
+///*	if(offset<++failcounter) */filler(buf, ".", NULL, 0/*failcounter*/); /* Current directory (.)  */
+///*	if(offset<++failcounter) */filler(buf, "..", NULL, 0/*failcounter*/);          /* Parent directory (..)  */
+//	return 0;
+
+	if(time(0) - parsedate(date) > MAXCACHEAGE) {
+		char slashpath[1024];
+		int bytes=0;
+		brintf("IN dirlist, old cache...\n");
+
+		strncpy(slashpath,path,1024);
+		strlcat(slashpath,"/",1024);
+		brintf("slashpath: %s\n",slashpath);
+		bytes=webfetch(slashpath,dirbuffer,DIRBUFFER,"GET","");
+
+		if(fetchstatus(dirbuffer)<200 || fetchstatus(dirbuffer)>299) {
+			free(dirbuffer);
+			return -ENOENT;
+		}
+		
+		if(bytes>0) {
+			fwrite(dirbuffer,1,bytes,dirfile);
+			rewind(dirfile);
+		}
 	}
-
-	brintf("SKIP SKIP SKIP CACHE - DO GET STUFF INSTAED!!!\n");
-	dirbuffer=malloc(DIRBUFFER);
-	
-	
-	webfetch(slashpath,dirbuffer,DIRBUFFER,"GET","");
 	if(strlen(dirbuffer)==0) {
-		free(dirbuffer);
-		return NOWEBS;
+		char *filecursor=dirbuffer;
+		brintf("Reading from cache because strlen of dirbuffer is 0.\n");
+		while(!feof(dirfile)) {
+			int bytes=fread(filecursor,1,8196,dirfile);
+			filecursor+=bytes;
+		}
 	}
-	//return 0; //OKAY, but EMPTY!
-	//we don't currently handle redirects (30x)
-	//nor (100 Continue)
-	//otherwise this would just say > 399 (would mean 400 or 500 errors)
-	if(fetchstatus(dirbuffer)<200 || fetchstatus(dirbuffer)>299) {
-		return -ENOENT;
-	}
-	//brintf("Fetchd: %s\n",dirbuffer);
-	status=regcomp(&re,"<a[^>]href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>",REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
+	fclose(dirfile);
+	//if we haven't managed to fill the dirbuffer, fill it now
+	int status=regcomp(&re,"<a[^>]href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>",REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
 	if(status!=0) {
 		char error[80];
 		regerror(status,&re,error,80);
@@ -749,12 +851,12 @@ crest_readdir_from_web(const char *path, void *buf, fuse_fill_dir_t filler,
 		//this is systemic failure, unmount and die.
 		exit(-1);
 	}
-	//return 0; //empty directory
 	int failcounter=0;
-    if(offset<++failcounter) filler(buf, ".", NULL, failcounter); /* Current directory (.)  */
-    if(offset<++failcounter) filler(buf, "..", NULL, failcounter);          /* Parent directory (..)  */
-    //if(offset<++failcounter) filler(buf,"poople",NULL,failcounter);
-    //return 0; //infinite loop?
+	if(offset<++failcounter) filler(buf, ".", NULL, failcounter); /* Current directory (.)  */
+	if(offset<++failcounter) filler(buf, "..", NULL, failcounter);          /* Parent directory (..)  */
+	//if(offset<++failcounter) filler(buf,"poople",NULL,failcounter);
+	//return 0; //infinite loop?
+	int weboffset=0;
 	while(status==0 && failcounter < TOOMANYFILES) {
 		failcounter++;
 		char hrefname[255];
@@ -771,61 +873,9 @@ crest_readdir_from_web(const char *path, void *buf, fuse_fill_dir_t filler,
 			//brintf("Link %s\n",linkname);
 			brintf("href: %s link: %s\n",hrefname,linkname);
 			if(strcmp(hrefname,linkname)==0) {
-				char chopslash[255];
-				char elempath[1024];
-				struct stat nodestat;
-
 				brintf("ELEMENT: %s\n",hrefname);
-				
-				strlcpy(elempath,path,1024); // TOTAL GUESS! This looks like it's WRONG FIXME
-				strlcat(elempath,"/",1024); //then slash, then...
-				
-				strlcpy(chopslash,hrefname,255);
-				if(chopslash[strlen(chopslash)-1]=='/') {
-					int dirmak=0;
-					chopslash[strlen(chopslash)-1]='\0';
-					strlcat(elempath,chopslash,1024);
-					
-					brintf("DIR ELEM PATH: %s\n",elempath);
-					
-					if(stat(elempath,&nodestat)==0) {
-						if (nodestat.st_mode & S_IFREG) {
-							brintf("Cache sub-node already exists, but it exists as a file when it should be a directory, so I'm going to delete it\n");
-							unlink(elempath);
-						}
-						if (nodestat.st_mode & S_IFDIR) {
-							brintf("Cache sub-node already exists, as a directory. going to next node!\n");
-							continue;
-						}
-					}				
-					brintf("I want to try to make directory: %s\n",elempath);
-					dirmak=mkdir(elempath+1,0777);
-					if(dirmak==-1 && errno!= EEXIST ) {
-						brintf("Fail to make directory for caching purposes! For shame! For shame!!!! (Reason: %d), means: %s\n",errno,strerror(errno));
-						brintf("Try to recursively make directory now");
-						redirmake(elempath+1);
-						brintf("Recursive directory mades!\n");
-					}
-				} else {
-					strlcat(elempath,chopslash,1024);
-					brintf("Making a file for directory-caching purposes: %s\n",elempath);
-					if(stat(elempath,&nodestat)==0) {
-						if(nodestat.st_mode & S_IFREG) {
-							brintf("File cache-node already exists, skipping...\n");
-							continue;
-						}
-						if(nodestat.st_mode & S_IFDIR) {
-							brintf("CRAP. sub-cache node exists, but is a directory, not a file. I coudl try to unlink it...\n");
-							if(rmdir(elempath)!=0) {
-								brintf("Unable to remove directory - probably because it's not empty: %s\n",elempath);
-								exit(189);
-							}
-						}
-					}
-					touch(elempath);
-				}
 				if(offset<failcounter) 
-					if(filler(buf, chopslash, NULL, failcounter)!=0) {
+					if(filler(buf, hrefname, NULL, failcounter)!=0) {
 						brintf("Filler said not zero.\n");
 						break;
 					}
@@ -840,98 +890,7 @@ crest_readdir_from_web(const char *path, void *buf, fuse_fill_dir_t filler,
 		brintf("Fail due to toomany\n");
 	}
 	free(dirbuffer);
-	//brintf("Now I make the dircache: %s?\n",dircachefile); //LEADING SLAHSES OK!!!!
-	//return 0; //STILL HERE FINE!!!!!!!!!!!!
-	//touch(dircachefile);
 	return 0; //success? or does that mean fail?
-}
-
-static int
-crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-              off_t offset, struct fuse_file_info *fi)
-{
-	char dircachefile[1024];
-	struct stat statbuf;
-	int statresult=-1;
-	
-	DIR *mydir;
-	struct dirent *dp=0;
-	char dircacheskip[1024];
-	char metacacheskip[1024];
-
-	
-	strlcpy(dircachefile,path,1024); 
-	strlcat(dircachefile,DIRCACHEFILE,1024);
-	
-	statresult=stat(dircachefile+1,&statbuf);
-
-	brintf("readdir: %s ",path);
-	brintf("Statresult: %d, ",statresult);
-	brintf("st_mode | S_IFREG: %d, ",statbuf.st_mode & S_IFREG);
-	brintf("now: %ld, ",time(0));
-	brintf("mtime: %ld, ",statbuf.st_mtime);
-	brintf("FULLCOMP: %d\n",(time(0)-statbuf.st_mtime <= MAXCACHEAGE));
-	
-	brintf("OFFSET? %ld\n",offset);
-
-	//if (strcmp(path, "/") == 0 || (statresult==0 && (statbuf.st_mode & S_IFREG) && (time(0)-statbuf.st_mtime <= MAXCACHEAGE))) {
-	if (!(strcmp(path, "/") == 0 || (statresult==0 && (statbuf.st_mode & S_IFREG) && (time(0)-statbuf.st_mtime <= MAXCACHEAGE)))) {
-		int resultstatus=crest_readdir_from_web(path,buf,filler,offset,fi);
-		//getting a '401 - gone' is NOT the same as the web being down
-		//the server says the page DOES NOT EXIST. the server MUST
-		//be respected.
-		if(resultstatus==0 || resultstatus==-ENOENT) {
-			brintf("crest_readdir_from_web is finished and is returning\n");
-			touch(dircachefile); //? WILL THIS CRASH IT?!
-			return resultstatus;
-		} else {
-			brintf("Funny results from crest_readdir_from_web: %d",resultstatus);
-		}
-	}
-
-	strlcpy(dircacheskip,DIRCACHEFILE,1024);//CONTAINS the leading slash! Gotta make sure to skip it when you use it.
-	strlcpy(metacacheskip,METAPREPEND,1024);
-	brintf("GENERATING DIRECTORY LISTING FROM CACHE!!!\n");
-
-	if(strcmp(path,"/")==0) {
-		mydir=opendir(".");
-	} else {
-		mydir=opendir(path+1);
-	}
-	//seekdir(mydir,offset);
-
-	//either we are exactly JUST the ROOT  dir OR we have a cache to read from
-	//in either case, we want to walk through what we have cached and list that.
-	while((dp=readdir(mydir))!=0) {
-		struct stat entry;
-		memset(&entry,0,sizeof(entry));
-		brintf("entry: '%s', vs. '%s' or '%s'\n",dp->d_name,dircacheskip+1,metacacheskip+1);
-		if(strcmp(dp->d_name,dircacheskip+1)==0 || strcmp(dp->d_name,metacacheskip+1)==0) { //need to skip the leading '/' in DIRCACHEFILE
-			//we don't want to display the DIRCACHEFILE's as if they are valid contents - they aren't!
-			//they're just an internal marker. This also becomes a good way to tell the difference between
-			//a cache directory and a live-mount directory - you can only see the DIRCACHEFILE's in the
-			//cache directory, they won't show up in the live directory
-			brintf("skipping my own crap in the directory\n");
-			continue;
-		}
-		if(dp->d_type==DT_REG || dp->d_type==DT_DIR) {
-			brintf("Directory Entry being added: '%s'\n",dp->d_name);
-			entry.st_ino=dp->d_ino;
-			entry.st_mode = dp->d_type << 12;
-			if(filler(buf, dp->d_name, NULL, 0)!=0) {
-				brintf("Filler from cachedir says not zero. break.\n");
-				break; 
-			}
-		}
-	}
-	/*filler(buf, ".", NULL, 0);
-	filler(buf, "..", NULL, 0);
-	filler(buf, "Doodie", NULL, 0);
-	filler(buf, "DooDoo", NULL, 0);
-	return 0; */
-
-	closedir(mydir);
-	return 0;
 }
 
 #define FILEMAX 64*1024*1024
@@ -1171,8 +1130,9 @@ crest_init(struct fuse_conn_info *conn)
 }
 
 static struct fuse_operations crest_filesystem_operations = {
-	.init	 = crest_init,	  /* mostly to keep access to cache		*/
+    .init    = crest_init,    /* mostly to keep access to cache     */
     .getattr = crest_getattr, /* To provide size, permissions, etc. */
+    .readlink= crest_readlink,/* to handle funny server redirects */
     .open    = crest_open,    /* To enforce read-only access.       */
     .read    = crest_read,    /* To provide file content.           */
     .readdir = crest_readdir, /* To provide directory listing.      */
@@ -1297,7 +1257,7 @@ main(int argc, char **argv)
 	//visible USAGE: 	./crestfs /tmp/doodle [cachedir]
 //	pretest();
 	
-	//INVOKE AS: 	./crestfs /tmp/doodle -r -s -d -o nolocalcaches
+	//INVOKE AS: 	./crestfs /tmp/doodle /tmp/cacheplace -r -s -d -o nolocalcaches
 	
 	// single user, read-only. NB!
 	
@@ -1310,6 +1270,12 @@ main(int argc, char **argv)
 	addparam(&myargc,&myargs,argv[0]);
 	//myargs[0]=argv[0];
 	addparam(&myargc,&myargs,argv[1]);
+	if(argv[1][0]!='/') {
+		char *here=getcwd(NULL,0);
+		strlcpy(rootdir,here,1024);
+		strlcat(rootdir,"/",1024);
+	}
+	strlcat(rootdir,argv[1],1024); //first parameter, is mountpoint
 	cachedir= open(argv[2], O_RDONLY);
 	if(cachedir==-1) {
 		brintf("%d no open cachedir\n",cachedir);
