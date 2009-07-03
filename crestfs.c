@@ -397,9 +397,11 @@ get_cacheelem(const char *path,char *headers,int maxheaderlen)
 	//there is a possibility that the 'file' that we're opening is not a file, after all, if so - return 0 so we don't try to write to it
 	//specifically, this seems to happen with SYMLINKS
 	struct stat precheck;
-	lstat(path+1,&precheck);
-	if(!(precheck.st_mode & S_IFREG)) {
+	brintf("I am giong to try to stat: %s\n",path+1);
+	
+	if(lstat(path+1,&precheck)==0 && !(S_ISREG(precheck.st_mode))) {
 		//if you're a FIFO, a directory, or a symlink - anything other than 'plain-jane file', return 0;
+		brintf("Cachefile exists and is not a regular file - returning '0', mode: %d\n",precheck.st_mode);
 		return 0;
 	}
 	FILE *cachefile=fopen(path+1,"r+");
@@ -452,6 +454,9 @@ void get_cachefiles(const char *path,FILE **header,FILE **data,void *headbuf,int
 	
 	*header=get_cacheelem(metafilename,headbuf,bufferlen);
 	*data=get_cacheelem(path,0,0);
+	if(*header==0 || *data==0) {
+		brintf("*header: %p, *data: %p\n",*header,*data);
+	}
 }
 
 /*** Directory Cache functionality ***/
@@ -722,10 +727,10 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	strlcat(buf,location+7,bufsize);
 	
 	brintf("I would love to unlink: %s, and point it to: %s\n",path+1,buf);
-	//int unlinkstat=unlink(path+1);
-	//int linkstat=symlink(buf,path+1);
+	int unlinkstat=unlink(path+1);
+	int linkstat=symlink(buf,path+1);
 	
-	//brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
+	brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
 	
 	return 0;
 }
@@ -904,8 +909,8 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	char length[32];
 	FILE *cachefile;
 	FILE *headerfile;
-	char cacheheaders[65535];
-	char etag[65535];
+	char cacheheaders[32767];
+	char etag[32];
 	char *headerend=0;
 	
 	char date[32];
@@ -913,7 +918,11 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	
 	int returnedbytes=0;
 
-	get_cachefiles(path,&headerfile,&cachefile,cacheheaders,65535);
+	get_cachefiles(path,&headerfile,&cachefile,cacheheaders,32767);
+	if(headerfile==0 || cachefile==0) {
+		brintf("get_cachefiles didn't work?!\n");
+		exit(57);
+	}
 	fetchheader(cacheheaders,"date",date,32); //this was the last time the content was fetched (or 0, which is 1/1/1970)
 	fetchheader(cacheheaders,"etag",etag,32);
 	//e-tag? last-modified-since?
@@ -942,6 +951,7 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 			}
 			hdrbytes=headerend-filebuffer+4;
 			brintf("HEADER BYTES CALCULATED TO BE: %d\n",hdrbytes);
+			brintf("cachefiles:headerfile: %p, cachefile: %p\n",headerfile,cachefile);
 			while(hdrstat<hdrbytes) {
 				hdrstat+=write(fileno(headerfile),filebuffer+hdrstat,hdrbytes-hdrstat);
 			}
@@ -1013,12 +1023,15 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	if (offset + size > file_size) { /* Trim the read to the file size. */
 		size = file_size - offset;
 	}
-
-	if(fseek(cachefile,offset,SEEK_SET)==-1) {
-		//cannot seek to point in file!
-		brintf("Seek off end of file, dying: %s.\n",strerror(errno));
-		exit(57);
+	brintf("I'm about to seek to %d\n",offset);
+	if(offset!=0) {
+		if(fseek(cachefile,offset,SEEK_SET)==-1) {
+			//cannot seek to point in file!
+			brintf("Seek off end of file, dying: %s.\n",strerror(errno));
+			exit(57);
+		}
 	}
+	brintf("Going to read %d bytes...\n",size);
 	returnedbytes = fread(buf,1,size,cachefile);
 	fclose(headerfile);
 	fclose(cachefile);
