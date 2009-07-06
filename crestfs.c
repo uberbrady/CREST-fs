@@ -133,7 +133,7 @@ int networkmode=0;
 int 
 webfetch(const char *path,char *buffer,int maxlength, const char *verb,char *etag)
 {
-	int sockfd, numbytes;  
+	int sockfd=-1, numbytes;  
 	struct addrinfo hints, *servinfo, *p;
 	int rv;
 	char hostname[HOSTLEN];
@@ -172,7 +172,6 @@ webfetch(const char *path,char *buffer,int maxlength, const char *verb,char *eta
 	if ((rv = getaddrinfo(hostname, "80", &hints, &servinfo)) != 0) {
 		brintf("I failed to getaddrinfo: %s\n", gai_strerror(rv));
 		buffer[0]='\0';
-		close(sockfd);
 		return 0;
 	}
 	brintf("Got getaddrinfo()...\n");
@@ -430,8 +429,10 @@ get_cacheelem(const char *path,char *headers,int maxheaderlen)
 		headers[cachelen]='\0'; //should also handle the case where the file didn't exist, and nothing was read.
 	}
 	brintf("going to rewind cachefile\n");
-	rewind(cachefile);
-	brintf("returning\n");
+	int fs=fseek(cachefile,0,SEEK_SET);
+	clearerr(cachefile);
+	//rewind(cachefile);
+	brintf("returning rew status: %d\n",fs);
 	return cachefile;
 }
 
@@ -713,26 +714,41 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	int st=0;
 	pathparse(path,hostname,pathpart,80,1024);
 	
+	//we SHOULD get the metadata cachefile and check the Date header on it,
+	//and if that's recent enough, use the symlink that's already there as the data cachefile
+	
+	
 	st=webfetch(path,header,HEADERLEN,"HEAD","");
-	fetchheader(header,"Location",location,4096);
-	
-	//from an http://www.domainname.com/path/stuff/whatever
-	//we must get to a local path.
-	if(strncmp(location,"http://",7)!=0) {
-		brintf("Unsupported protocol, or missing 'location' header: %s\n",location);
-		return -ENOENT;
-	}
-	strlcpy(buf,rootdir,bufsize); //fs 'root'
-	strlcat(buf,"/",bufsize);
-	strlcat(buf,location+7,bufsize);
-	
-	brintf("I would love to unlink: %s, and point it to: %s\n",path+1,buf);
-	int unlinkstat=unlink(path+1);
-	int linkstat=symlink(buf,path+1);
-	
-	brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
-	
-	return 0;
+	if(st>0) {
+		fetchheader(header,"Location",location,4096);
+		
+		//from an http://www.domainname.com/path/stuff/whatever
+		//we must get to a local path.
+		if(strncmp(location,"http://",7)!=0) {
+			brintf("Unsupported protocol, or missing 'location' header: %s\n",location);
+			return -ENOENT;
+		}
+		strlcpy(buf,rootdir,bufsize); //fs 'root'
+		strlcat(buf,"/",bufsize);
+		strlcat(buf,location+7,bufsize);
+		
+		brintf("I would love to unlink: %s, and point it to: %s\n",path+1,buf);
+		int unlinkstat=unlink(path+1);
+		int linkstat=symlink(buf,path+1);
+		
+		brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
+		return 0;
+	} else {
+		//no data on web, internet is unhappy
+		int linklen=readlink(path+1,buf,bufsize);
+		if(linklen) {
+			buf[linklen]='\0';
+			return 0;
+		} else {
+			brintf("Can't read link %s: %s\n",path+1,strerror(errno));
+			return -ENOENT;
+		}
+	}	
 }
 
 static int
@@ -802,6 +818,10 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	}
 
 	char *dirbuffer=malloc(DIRBUFFER);
+	if(dirbuffer==0) {
+		brintf("Great, can't malloc our dirbuffer. baililng.\n");
+		exit(19);
+	}
 	dirbuffer[0]='\0';
 	
 	regex_t re;
@@ -813,11 +833,17 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	brintf("Dircachefile: %s\n",dircachefile);	
 	dirfile=get_cacheelem(dircachefile,headers,8196);
 	fetchheader(headers,"Date",date,80);
+	//brintf("So as to mention, the headers IS: %s\n",headers);
 	
 ///*	if(offset<++failcounter) */filler(buf, ".", NULL, 0/*failcounter*/); /* Current directory (.)  */
 ///*	if(offset<++failcounter) */filler(buf, "..", NULL, 0/*failcounter*/);          /* Parent directory (..)  */
 //	return 0;
-
+	brintf("okay, sanity check time. how's our cache file pointer looking right now?\n");
+	char nutjob[9]="";
+	fread(nutjob,8,1,dirfile);
+	nutjob[8]='\0';
+	brintf("initial results are: %s\n",nutjob);
+	rewind(dirfile);
 	if(time(0) - parsedate(date) > MAXCACHEAGE) {
 		char slashpath[1024];
 		int bytes=0;
@@ -828,22 +854,31 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		brintf("slashpath: %s\n",slashpath);
 		bytes=webfetch(slashpath,dirbuffer,DIRBUFFER,"GET","");
 
-		if(fetchstatus(dirbuffer)<200 || fetchstatus(dirbuffer)>299) {
-			free(dirbuffer);
-			return -ENOENT;
-		}
-		
 		if(bytes>0) {
+			if(fetchstatus(dirbuffer)<200 || fetchstatus(dirbuffer)>299) {
+				// prepare for 304 We don't do etags for directories.
+				free(dirbuffer);
+				return -ENOENT;
+			}
+		
 			fwrite(dirbuffer,1,bytes,dirfile);
 			rewind(dirfile);
+		} else {
+			brintf("No bytes retrieved from Webernet...\n");
 		}
 	}
 	if(strlen(dirbuffer)==0) {
 		char *filecursor=dirbuffer;
-		brintf("Reading from cache because strlen of dirbuffer is 0.\n");
-		while(!feof(dirfile)) {
+		brintf("Reading from cache because strlen of dirbuffer is 0. Dirfile: %p\n",dirfile);
+		brintf("More about our dirfile friend: feof: %d, and ferror? %d (strerror says: %s)\n",feof(dirfile),ferror(dirfile),strerror(errno));
+		brintf("Ftell syas: %s\n",ftell(dirfile));
+		while(!feof(dirfile) && !ferror(dirfile)) {
 			int bytes=fread(filecursor,1,8196,dirfile);
-			filecursor+=bytes;
+			brintf("I just read %d bytes\n",bytes);
+			if(bytes<=0) {
+				brintf("Bad bytes? %d\n feof: %d, ferror: %d, explanation: %s\n",bytes,feof(dirfile),ferror(dirfile),strerror(errno));
+			}
+			filecursor=(filecursor+bytes);
 		}
 	}
 	fclose(dirfile);
