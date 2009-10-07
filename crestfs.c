@@ -410,6 +410,9 @@ get_cacheelem(const char *path,char *headers,int maxheaderlen)
 		brintf("Couldn't make cachefile '%s' easily, checking folders...\n",path+1);
 		redirmake(path+1);
 		cachefile=fopen(path+1,"w+"); //should we force exclusive!?
+		if(cachefile) {
+			fchmod(fileno(cachefile),0777);
+		}
 	}
 	if(!cachefile) {
 		brintf("WARNING: Cache file opened read-only (could not open read-write)!!!!\n");
