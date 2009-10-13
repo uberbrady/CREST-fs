@@ -86,6 +86,8 @@ char * strptime(char *,char *,struct tm *);
 
 /* utility functions for debugging, path parsing, fetching, etc. */
 
+void brintf(char *format,...) __attribute__ ((format (printf, 1,2)));
+
 void brintf(char *format,...)
 {
 	va_list whatever;
@@ -239,6 +241,76 @@ webfetch(const char *path,char *buffer,int maxlength, const char *verb,char *eta
 	return bytessofar;
 }
 
+//returns FILE DESCRIPTOR for connection.
+
+int
+http_request(char *fspath,char *verb,char *etag)
+{
+	char hostpart[1024];
+	char pathpart[1024];
+	pathparse(fspath,hostpart,pathpart,1024,1024);
+	int rv;
+	struct addrinfo hints, *servinfo, *p;
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	int sockfd;
+	char *reqstr=0;
+	char etagheader[1024];
+	
+	brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
+
+	if ((rv = getaddrinfo(hostpart, "80", &hints, &servinfo)) != 0) {
+		brintf("I failed to getaddrinfo: %s\n", gai_strerror(rv));
+		return 0;
+	}
+	brintf("Got getaddrinfo()...\n");
+
+	// loop through all the results and connect to the first we can
+	for(p = servinfo; p != NULL; p = p->ai_next) {
+		if ((sockfd = socket(p->ai_family, p->ai_socktype,
+				p->ai_protocol)) == -1) {
+			perror("client: socket");
+			continue;
+		}
+
+		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+			close(sockfd);
+			perror("client: connect");
+			continue;
+		}
+
+		break;
+	}
+
+	if (p == NULL) {
+		fprintf(stderr, "client: failed to connect\n");
+		close(sockfd);
+		return 0;
+	}
+
+	brintf("Okay, connectication has occurenced\n");
+
+/*     getsockname(sockfd, s, sizeof s);
+    brintf("client: connecting to %s\n", s);
+*/
+	if(strcmp(etag,"")!=0) {
+		strcpy(etagheader,"If-None-Match: ");
+		strlcat(etagheader,etag,1024);
+		strlcat(etagheader,"\r\n",1024);
+	} else {
+		etagheader[0]='\0';
+	}
+	freeaddrinfo(servinfo); // all done with this structure
+	asprintf(&reqstr,"%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: CREST-fs/0.2\r\n%s\r\n",verb,pathpart,hostpart,etagheader);
+	brintf("REQUEST: %s\n",reqstr);
+	send(sockfd,reqstr,strlen(reqstr),0);
+	free(reqstr);
+
+	return sockfd;
+	
+}
+
 void
 reanswer(char *string,regmatch_t *re,char *buffer,int length)
 {
@@ -388,8 +460,6 @@ void redirmake(const char *path)
 	}
 }
 
-//path will look like "/domainname.com/directoryname/file" - with leading slash
-
 FILE *
 get_cacheelem(const char *path,char *headers,int maxheaderlen)
 {
@@ -403,7 +473,7 @@ get_cacheelem(const char *path,char *headers,int maxheaderlen)
 		brintf("Cachefile exists and is not a regular file - returning '0', mode: %d\n",precheck.st_mode);
 		return 0;
 	}
-	FILE *cachefile=fopen(path+1,"r+");
+	FILE *cachefile=fopen(path+1,"r");
 	int cachelen=0;
 	if(!cachefile) {
 		//couldn't make the cachefile easily, check we've got folders
@@ -413,6 +483,7 @@ get_cacheelem(const char *path,char *headers,int maxheaderlen)
 		if(cachefile) {
 			fchmod(fileno(cachefile),0777);
 		}
+		cachefile=freopen(0,"r",cachefile); //force read-only; we don't write directly into caches, we rename() into them
 	}
 	if(!cachefile) {
 		brintf("WARNING: Cache file opened read-only (could not open read-write)!!!!\n");
@@ -500,11 +571,486 @@ void	insertdircache(const char *path,struct stat *st)
 	memcpy(&(dircache[dircacheentries].st),st,sizeof(struct stat));
 	dircacheentries++;
 }
-
+ //directory cache was a nice simple win; but we don't need it anymore with the aggressive directory-fetch
+//and impossible-file negation
 /******************* END UTILITY FUNCTIONS< BEGIN ACTUALLY DOING OF STUFF!!!!! *********************/
 
 #define HEADERLEN 65535
 #define DIRCACHEFILE "/.crestfs_directory_cachenode"
+
+FILE *
+fopenr(char *filename,char*mode)
+{	
+	redirmake(filename);
+	return fopen(filename,mode);
+}
+
+#include <libgen.h> //for 'dirname'
+
+
+#define DIRBUFFER	1*1024*1024
+// 1 MB
+
+#define DIRREGEX	"<a[^>]href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>"
+
+#define TOOMANYFILES 200
+
+
+//path will look like "/domainname.com/directoryname/file" - with leading slash
+
+/*
+	examples:
+	
+	desk.nu/infinix <--resource is actually a directory.
+	
+	check caches
+*/
+int
+impossible_file(const char *path)
+{
+	char *slashloc=(char *)path+1;
+	char *dirbuffer=malloc(DIRBUFFER); //DIRBUFFER (1 MB) directory page
+	regex_t re;
+
+	brintf("TESTIG FILE IMPOSSIBILITY FOR: %s\n",slashloc);
+	int status=regcomp(&re,DIRREGEX,REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
+	if(status!=0) {
+		char error[80];
+		regerror(status,&re,error,80);
+		brintf("ERROR COMPILING REGEX: %s\n",error);
+		//this is systemic failure, unmount and die.
+		exit(-1);
+	}
+	
+	while((slashloc=strchr(slashloc,'/'))!=0) {
+		char foldbuf[1024];
+		char metafoldbuf[1024];
+		char dirnamebuf[1024];
+		char basenamebuf[1024];
+		char *dn=0;
+		char *bn=0;
+		int slashoffset=slashloc-path;
+		FILE *metaptr;
+		FILE *dataptr;
+		
+		strlcpy(foldbuf,path,1024);
+		foldbuf[slashoffset]='\0'; //why? I guess the pointer is being advanced PAST the slash?
+		//brintf("Testing component: %s, ",foldbuf);
+		strlcpy(dirnamebuf,foldbuf,1024);
+		dn=dirname(dirnamebuf);
+		
+		strlcpy(basenamebuf,foldbuf,1024);
+		bn=basename(basenamebuf);
+
+		brintf("Component: %s, basename: %s, dirname: %s\n",foldbuf,bn,dn);
+		
+		strlcat(dirnamebuf,DIRCACHEFILE,1024);
+		strlcpy(metafoldbuf,METAPREPEND,1024);
+		strlcat(metafoldbuf,"/",1024);
+		strlcat(metafoldbuf,dirnamebuf,1024);
+		
+		brintf("metafolder: %s, dirname is: %s\n",metafoldbuf+1,dirnamebuf+1);
+		
+		if((metaptr=fopen(metafoldbuf+1,"r"))) {
+			//ok, we opened the metadata for the directory..
+			char headerbuf[65535];
+			char datebuf[1024];
+			fread(headerbuf,1,65535,metaptr);
+			brintf("Buffer we are checking out is: %s",headerbuf);
+			fetchheader(headerbuf,"date",datebuf,1024);
+			if(time(0) - parsedate(datebuf) <= MAXCACHEAGE) {
+				//okay, the metadata is fresh...
+				brintf("Metadata is fresh enough!\n");
+				if((dataptr=fopen(dirnamebuf+1,"r"))) {
+					//okay, we managed to open the directory data...
+					int failcounter=0;
+					char foundit=0;
+					regmatch_t rm[3];
+					
+					memset(rm,0,sizeof(rm));
+					fread(dirbuffer,1,DIRBUFFER,dataptr);
+
+					//if(offset<++failcounter) filler(buf,"poople",NULL,failcounter);
+					//return 0; //infinite loop?
+					int weboffset=0;
+					brintf("Able to look at directory contents, while loop starting...\n");
+					while(status==0 && failcounter < TOOMANYFILES) {
+						failcounter++;
+						char hrefname[255];
+						char linkname[255];
+
+						weboffset+=rm[0].rm_eo;
+						brintf("Weboffset: %d\n",weboffset);
+						status=regexec(&re,dirbuffer+weboffset,3,rm,0); // ???
+						if(status==0) {
+							reanswer(dirbuffer+weboffset,&rm[1],hrefname,255);
+							reanswer(dirbuffer+weboffset,&rm[2],linkname,255);
+
+							//brintf("Href? %s\n",hrefname);
+							//brintf("Link %s\n",linkname);
+							brintf("href: %s link: %s\n",hrefname,linkname);
+							if(strcmp(hrefname,linkname)==0) {
+								brintf("ELEMENT: %s, comparing to %s\n",hrefname,bn);
+								if(strcmp(hrefname,bn)==0) {
+									//file seems to exist, let's not bother here anymore
+									foundit=1;
+									break;
+								}
+							}
+						} else {
+							char error[80];
+							regerror(status,&re,error,80);
+							brintf("Regex status is: %d, error is %s\n",status,error);
+						}
+						//brintf("staus; %d, 0: %d, 1:%d, 2: %d, href=%s, link=%s\n",status,rm[0].rm_so,rm[1].rm_so,rm[2].rm_so,hrefname,linkname);
+						//filler?
+						//filler(buf,rm[])
+					}
+					if(foundit==0) {
+						//okay, you walked through a FRESH directory listing, looking at all the files
+						//and did NOT see one of the components you've asked about. So this file is
+						//*IMPOSSIBLE*
+						brintf("This file seems pretty impossible to me.!\n");
+						free(dirbuffer);
+						return 1;
+					}
+					
+				} else {
+					brintf("Can't open directory contents file.\n");
+				}
+			} else {
+				brintf("Metadata file is too stale to be sure\n");
+			}
+		} else {
+			brintf("Could not open metadata file\n");
+		}
+
+		slashloc+=1;//iterate past the slash we're on
+	}
+	free(dirbuffer);
+	return 0; //must not be impossible, or we would've returned previously
+}
+/* Given, a 'path', of which the first element is a hostname, and the rest are path elements,
+   Check the cache and refresh it (if necessary), returning finally a FILE * (read-only), which is
+   the Content part of the HTTP resource. The headers can optionally be loaded into the headers buffer, (which can be 0),
+   up to headerlength.
+
+   This function will be aggressive in terms of pre-fetching data it believes could be useful, or that has been useful in the past. It
+   may convert a HEAD request into a GET request if it feels it necessary. It may make no requests at all if the caches are recent enough.
+
+   It probably won't know the difference between a file and a directory, nor will it know how to convert path names into cachefile names
+   That's the responsibility of the caller. No, wait, in the case where there is not yet an existing cache file or directory, the caller
+   won't know either!!! The idea is we want to 'hide' the cache from callers, so they don't need to know how it's organized or works, they
+   can just depend upon this function to return a file pointer they can walk through. So it will be cleverer than I said.
+
+   nonexistent resources will return 0
+
+	404 cachefiles - interesting problem. If I ask for a completely stupid path - /a/b/c/d - my algorithm will look for /a/b/c.
+			since there's no /a/b, I won't be able to drop a 404 file for /a/b/c. If stat()'s always walk up the dirpath
+			that's probably okay, but I am not sure about that.
+ */
+
+#include <sys/file.h> //for flock?
+
+
+FILE *
+get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb)
+{
+	//first, check cache. How's that looking?
+	struct stat cachestat;
+	char webresource[1024];
+	char cachefilebase[1024];
+	char headerfilename[1024];
+	char selectedverb[80];
+	FILE *headerfile=0;
+	char etag[256];
+	int mysocket=-1;
+	char *slashlessmetaprepend=0;
+	int dirmode=0;
+	
+	char*headerbuf=malloc(65535);
+
+	headerbuf[0]='\0';
+	if(preferredverb==0) {
+		preferredverb="GET";
+	}
+	
+	strncpy(cachefilebase,path+1,1024); //default non-directory path for a cache file...
+	strncpy(webresource,path,1024); //default web resource corresponding...
+	slashlessmetaprepend=METAPREPEND;
+	slashlessmetaprepend++;
+	strncpy(headerfilename,slashlessmetaprepend,1024);
+	strncat(headerfilename,path,1024); //need the prepended '/' from path, not cachefilebase
+
+	strncpy(selectedverb,preferredverb,80);
+	//if there is an etag, and the request is a HEAD, upgrade to a GET.
+		
+	*isdirectory=0; //we can say this because the ONLY way to really 'get' a directory is to GET directory+'/', which requires
+			//a reinvoke of this function (witht the appropriate cache directory already in place)
+			//if that happens, it will appropriately rewrite isdirectory.
+			//if the resource you're looking for turns out to actually *be* a directory, this function will get reinvoked
+			//this means we could get into an infinite loop if a you request a resource "foo" that returns a redirect to "foo/"
+			//(which implies it's a directory), and then when you try to GET foo/ , you get a 404 - this will loop forever.
+	if(impossible_file(path)) {
+		if(headers && headerlength>0) {
+			headers[0]='\0';
+			free(headerbuf);
+			return 0;
+		}
+	}
+	if(lstat(path+1,&cachestat)==0) { //note we don't use stat() time for anything!!! we're just checking for directory mode
+		//cache file/directory/link/whatever *does* exist, if it's a directory, push to 'directory mode'
+		//that's all we do with this 'stat' value - the bulk of the logic is based on *header* data, not data-data.
+		brintf("Cache entity seems to exist?\n");
+		if(S_ISDIR(cachestat.st_mode)) {
+			brintf("ENGAGING DIRECTORY MODE - because the cache entity *IS* a directory!\n");
+			// resource we'll need to HEAD or GET will need '/' appended to it
+			// cachefile with stuff in it we'll care about will be (path+1)+"/.crestfs_directory_cachenode"
+			// with HTTP headers in .crestfs_metadata_rootnode/(path+1)+"/.crestfs_directory_cachenode"
+			
+			//and FURTHERMORE - the type we're assuming this resource is may no longer be true - 
+			//a file could've converted into a directory or some such!
+			strncat(cachefilebase,DIRCACHEFILE,1024); //need to append the "/.crestfs_directory_cachenode"	
+			strncat(webresource,"/",1024);
+			strncat(headerfilename,DIRCACHEFILE,1024); //append same to metadata filename?
+			if(isdirectory) {
+				*isdirectory=1;
+			}
+			dirmode=1; //regardless of *isdirectory, I need to know this if we 404 later.
+			// I MIGHT LIKE TO DO THE 'MODE-escalation' and etags stuff here? But I haven't *READ* the headers yet...
+			//don't matter. Whether or not I got etags, I want this directory's contents
+			if(strcmp(preferredverb,"HEAD")==0) {
+				strcpy(selectedverb,"GET");
+			}
+		}
+	}
+	
+	//see if we have a cachefile of some sort. how old is it? Check the Date: header in its HTTP header data.
+	//does this need to be LOCKed??????????  ************************  read LOCK ??? ***********************
+	headerfile=fopenr(headerfilename,"r+"); //the cachefile may not exist - we may have just had the 'real' file, or the directory
+						//if so, that's fine, it will parse out as 'too old (1/1/1970)'
+	if(headerfile) {
+		char datebuf[80];
+		flock(fileno(headerfile),LOCK_SH);
+		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
+		fread(headerbuf,1,65535,headerfile);
+		fetchheader(headerbuf,"Date",datebuf,80);
+		brintf("Headers from cache are: %s, date buffer is: %s\n",headerbuf,datebuf);
+		if(time(0) - parsedate(datebuf) <= MAXCACHEAGE) {
+			//our cachefile is recent enough
+			//fill up the stat() buffer? *THIS MAKES ME UNCOMFORTABLE!!!!*
+			// if I give them a set of headers, they can do it they damn self!
+			brintf("RECENT ENOUGH CACHE! SHORT_CIRCUIT!\n");
+			if(headers && headerlength>0) {
+				strncpy(headers,headerbuf,headerlength);
+			}
+			free(headerbuf);
+			fclose(headerfile); //RELEASE LOCK!!!!!
+			return fopen(cachefilebase,"r");
+		} else {
+			brintf("Cache file is too old; continuing with normal behavior. Date: %d, now: %d, MAXCACHEAGE: %d\n",
+				(int)parsedate(datebuf),(int)time(0),MAXCACHEAGE);
+		}
+	} else {
+		//no cachefile exists, we ahve to create one while watching out for races.
+		/**** EXCLUSIVE WRITE LOCK! *****/
+		//RACE Condition - new file that's never been seen before, when we get *here*, we will have no header cache nor data cache file upon
+		//which one might flock() ... but creating said file - when it might be a directory - could be bad. What to do, what to do?
+		//fock()
+		brintf("Instantiating non-existent metadata cachefile for something.\n");
+		if(!(headerfile=fopenr(headerfilename,"w+x"))) {
+			brintf("RACE CAUGHT ON FILE CREATION! NOt sure what to do about it though... reason: %s\n",strerror(errno));
+			headerfile=fopenr(headerfilename,"w"); //this means a race was found and prevented(?)
+		}
+		flock(fileno(headerfile),LOCK_SH); //shared lock will immediately be upgraded...
+	}
+	if(!headerfile) {
+		brintf("FAIL TO OPEN DE HEADER-CACHEFILE!");
+		exit(9);
+	}
+	
+	//either there is no cachefile for the headers, or it's too old.
+	//the weird thing is, we have to be prepared to return our (possibly-outdated) cache, if we can't get on the internet
+	
+	//check parent directory for recentness, and if it is, and this file isn't in it, return as if 404? 
+	//   (shortcuts lots of HEAD's for nonexistent resources)
+		
+	fetchheader(headerbuf,"etag",etag,256);
+	
+	mysocket=http_request(webresource,selectedverb,etag);
+	
+	if(mysocket > 0) {
+		char mybuffer[65535];
+		int bytes=0;
+		char *bufpointer=mybuffer;
+		//first fetch headers into headerfile, then fetch body into body file
+		//wait,we cant do that. if we're "accelerating" a supposed directory, or we're GET'ing an entity that turns out to be a directory,
+		//we won't want to write the headerfiles here.
+		
+		//also, if this turned out to be a HEAD, we can't write to the data-cachefile
+		while ((bytes = recv(mysocket,bufpointer,65535-(bufpointer-mybuffer),0)) && bufpointer-mybuffer < 65535) {
+			char *headerend=0;
+			brintf("RECV'ed: %d bytes, into %p",bytes,bufpointer);
+			bufpointer=(bufpointer+bytes);
+			
+			//keep looking for \r\n\r\n in the header we've got...
+			//once we've got that, check status
+			if((headerend = strstr(mybuffer,"\r\n\r\n"))) {
+				FILE *datafile=0;
+				char tempfile[80];
+				char dn[1024];
+				char location[1024];
+				int truncatestatus=0;
+				
+				//found the end of the headers!
+				brintf("FOund the end of the headers! this many bytes: %d",headerend-mybuffer);
+				headerend+=4;
+				//*headerend='\0'; //I think this is scribbling on the data :(
+				//brintf("And I think the headers ARE: %s",mybuffer);
+				brintf("We should be fputsing it to: %p\n",headerfile);
+				truncatestatus=ftruncate(fileno(headerfile),0); // we are OVERWRITING THE HEADERS - we got new headers, they're good, we wanna use 'em
+				rewind(headerfile); //I think I have to do this or it will re-fill with 0's?!
+				//brintf(" Craziness - the number of bytes we should be fputsing is: %d\n",strlen(mybuffer));
+				brintf("truncating did : %d",truncatestatus);
+				if(truncatestatus) {
+					brintf(", cuzz: %s\n",strerror(errno));
+				}
+				brintf("\n");
+				
+				if(headerend-mybuffer>=65535) {
+					brintf("Header overflow, I bail.\n");
+					exit(99);
+				}
+				strncpy(headerbuf,mybuffer,headerend-mybuffer);
+				headerbuf[headerend-mybuffer+1]='\0';
+				fputs(headerbuf,headerfile);
+				if(headers && headerlength>0) {
+					strncpy(headers,headerbuf,headerlength);
+				}
+				//copy the newly-found headers to the headerfile and keep fetching into the file buffer
+				//unlock?!!? ***** UNlocK ******
+				//rename() file into place, rewind file pointer thingee,
+				//freopen file pointer thingee to be read-only, and then
+				//return the file buffer
+				//write the remnants of the recv'ed header...
+				brintf("HTTP Header is: %d\n",fetchstatus(mybuffer));
+				switch(fetchstatus(mybuffer)) {
+					case 200:
+					//ONE THING WE NEED TO NOTE - if this was a HEAD instead of a GET,
+					//we need to be sensitive about the cachefile?
+					strncpy(dn,cachefilebase,1024);
+					dirname(dn);
+					strncpy(tempfile,dn,80);
+					strncat(tempfile,"/.tmpfile.XXXXXX",80);
+					redirmake(tempfile); //make sure intervening directories exist, since we can't use fopenr()
+					mkstemp(tempfile); //dumbass, this creates the file.
+					brintf("tempfile will be: %s, it's in dirname: %s\n",tempfile,dn);
+					datafile=fopen(tempfile,"w+");
+					if(!datafile) {
+						brintf("Cannot open datafile for some reason?: %s",strerror(errno));
+					}
+					brintf("These are how many bytes are in the Remnant: %d out of %d read\n",bufpointer-headerend,bytes);
+					brintf("Here's the data you should be writing: %hhd %hhd %hhd\n",headerend[0],headerend[1],headerend[2]);
+					brintf("Datafile is: %p\n",datafile);
+					fwrite(headerend,(bufpointer-headerend),1,datafile); //i think this is wrong, we'll have to see.
+					while((bytes = recv(mysocket,mybuffer,65535,0))) { //re-use existing buffer
+						fwrite(mybuffer,bytes,1,datafile);
+					}
+					if(rename(tempfile,cachefilebase)) {
+						brintf("Could not rename file to %s because: %s\n",cachefilebase,strerror(errno));
+					}
+					datafile=freopen(cachefilebase,"r",datafile);
+					if(!datafile) {
+						brintf("Failed to reopen datafile?!: %s\n",strerror(errno));
+					}
+					rewind(datafile);
+					fclose(headerfile); //RELEASE LOCK
+					free(headerbuf);
+					return datafile;
+					break;
+					
+					case 304:
+					//copy the newly found headers to the headerfile (to get the new Date: header),
+					//return the EXISTING FILE buffer (no change)
+					//we do *NOT* want any remnants from the netowrk'ed gets, we're going to let them die in the buffer
+					datafile=fopen(cachefilebase,"r"); //use EXISTING basefile...
+					fclose(headerfile); // RELEASE LOCK
+					free(headerbuf);
+					return datafile;
+					break;
+					
+					case 301:
+					case 302:
+					case 303:
+					case 307:
+					//check for directory
+					//IF SO: make a cache dir to represent this directory, AND RETRY REQUEST!
+					//IF NOT! Treat as symlink(?!). Write headers to headerfile. return no data (or empty file?)
+					//NB. Requires a change to readlink()
+					//there is NO datafile to work with here, but we don't return 0...how's that gonna work?
+					
+					fetchheader(headerbuf,"location",location,1024);
+					if(strcmp(location,"")!=0 && location[strlen(location)-1]=='/') {
+						brintf("Location discovered to be: %s, assuming DIRECTORY and rerunning!\n",location);
+						//assume this must be a 'directory', but we requested it as if it were a 'file' - rerun!
+						redirmake(cachefilebase); //make enough of a path to hold what will go here
+						unlink(cachefilebase); //if it's a file, delete the file; it's not a file anymore
+						mkdir(cachefilebase,0700); 
+						unlink(headerfilename); //the headerfile being a file will mess things up too
+									//and besides, it's just going to say '301', which isn't helpful
+						fclose(headerfile);
+						free(headerbuf);
+						return get_resource(path,headers,headerlength,isdirectory,preferredverb);	
+					}
+					//otherwise (no slash at end of location path), we must be a plain, boring symlink or some such.
+					//yawn.
+					fclose(headerfile); //release lock
+					free(headerbuf);
+					return 0; //do we return a filepointer to an empty file or 0? NOT SURE!
+					break;
+					
+					case 404:
+					//Only weird case we got is *IF* we 'accelerated' this into a directory request, and we 404'ed,
+					//it may be a regular file now. DELETE THE DIRECTORY, possibly the directoryfilenode thing,
+					//and RETRY REQUEST!!!
+					
+					//be prepared to drop a 404 cachefile! This will prevent repeated requests for nonexistent entities
+					if(dirmode) {
+						//we 404'ed in dirmode. Shit.
+						char headerdirname[1024];
+						brintf("Directory mode resulted in 404. Retrying as regular file...\n");
+						unlink(cachefilebase);
+						unlink(headerfilename);
+						rmdir(path+1);
+						strncpy(headerdirname,slashlessmetaprepend,1024);
+						strncat(headerdirname,path,1024);
+						rmdir(headerdirname);
+						brintf("I should be yanking directories %s and %s\n",path+1,headerdirname);
+						return get_resource(path,headers,headerlength,isdirectory,preferredverb);
+					}
+					brintf("404 mode, I *may* be closing the cache header file...\n");
+					brintf(" Results: %d",fclose(headerfile)); //Need to release locks on 404's too!
+					return 0; //nonexistent file, return 0, hold on to cache, no datafile exists.
+					break;
+					
+					default:
+					brintf("Unknown HTTP status?!");
+					exit(23); //not implemented
+					break;
+				}
+			} 
+		}
+	} 
+	//if things went remotely well and internet-connectedly, you shouldn't end up here.
+	//if you did, something screwed up. Try to at least return a cachefile or something.
+	//try to return the cached stuff?
+	//it could be stale.
+	FILE *staledata=0;
+	brintf("BAD INTERNET CONNECTION, returning possibly-stale cache entries");
+	staledata=fopen(cachefilebase,"r");
+	fclose(headerfile); //RELEASE LOCK!
+	return staledata;
+}
 
 static int
 crest_getattr(const char *path, struct stat *stbuf)
@@ -545,7 +1091,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 					return 0;
 				}
 			}
-			//first! Check cache
+			//first! Check cache 
 			brintf("going to be statting: %s\n",path+1);
 			if(lstat(path+1,&cachestat)==0) {
 				char date[80];
@@ -612,7 +1158,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 					brintf("nonexistent file, so sayeth the Server. Obey.\n");
 					if(cachefile) fclose(cachefile);
 					if(headerfile) fclose(headerfile);
-					insertdircache(path,&blankstat);
+//					insertdircache(path,&blankstat);
 					return -ENOENT;
 				}
 				//brintf("Headers fetched: %s",header);
@@ -640,7 +1186,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 						//e.g. - user has been redirected to a directory, then:
 						stbuf->st_mode = S_IFDIR | 0755; //I am a a directory?
 						stbuf->st_nlink = 1; //a lie, to allow find(1) to work.		
-						insertdircache(path,stbuf); //cache this please
+						//insertdircache(path,stbuf); //cache this please
 					} else {
 						//ZERO caching attempts, to start with...
 						stbuf->st_mode = S_IFLNK;
@@ -783,11 +1329,6 @@ void touch(char *path)
 	fclose(f);
 }
 
-#define DIRBUFFER	1*1024*1024
-// 1 MB
-
-#define TOOMANYFILES 200
-
 static int
 crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
               off_t offset, struct fuse_file_info *fi)
@@ -808,7 +1349,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		
 		mydir=opendir(".");
 		while((dp=readdir(mydir))!=0) {
-			brintf("Potential dir is: %s, id: %d (vs offset: %d)\n",dp->d_name,id,offset);
+			brintf("Potential dir is: %s, id: %d (vs offset: %d)\n",dp->d_name,id,(int)offset);
 			if(id>offset) {
 				if(filler(buf,dp->d_name,NULL,id)!=0) {
 					break;
@@ -874,7 +1415,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		char *filecursor=dirbuffer;
 		brintf("Reading from cache because strlen of dirbuffer is 0. Dirfile: %p\n",dirfile);
 		brintf("More about our dirfile friend: feof: %d, and ferror? %d (strerror says: %s)\n",feof(dirfile),ferror(dirfile),strerror(errno));
-		brintf("Ftell syas: %s\n",ftell(dirfile));
+		brintf("Ftell syas: %ld\n",ftell(dirfile));
 		while(!feof(dirfile) && !ferror(dirfile)) {
 			int bytes=fread(filecursor,1,8196,dirfile);
 			brintf("I just read %d bytes\n",bytes);
@@ -886,7 +1427,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	}
 	fclose(dirfile);
 	//if we haven't managed to fill the dirbuffer, fill it now
-	int status=regcomp(&re,"<a[^>]href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>",REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
+	int status=regcomp(&re,DIRREGEX,REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
 	if(status!=0) {
 		char error[80];
 		regerror(status,&re,error,80);
@@ -970,6 +1511,7 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	brintf("I'm getting a file %s for which the cache date is: %s\n",path,date);
 
 	if(time(0) - parsedate(date) > MAXCACHEAGE) {
+		// NEED FILE LOCK! FOR REFRESH!
 		filebuffer=malloc(FILEMAX);
 		brintf("OLD cachefile!\n");
 		int totalbytes=webfetch(path,filebuffer,FILEMAX,"GET",etag);
@@ -1023,6 +1565,7 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 			return -ENOENT;
 		}
 		free(filebuffer);
+		//UNLOCK!
 	}
 	
 	//okay, reiterate where we are at:
@@ -1061,7 +1604,7 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	if (offset + size > file_size) { /* Trim the read to the file size. */
 		size = file_size - offset;
 	}
-	brintf("I'm about to seek to %d\n",offset);
+	brintf("I'm about to seek to %ld\n",offset);
 	if(offset!=0) {
 		if(fseek(cachefile,offset,SEEK_SET)==-1) {
 			//cannot seek to point in file!
@@ -1298,6 +1841,8 @@ addparam(int *argc,char ***argv,char *string)
 	//brintf("\n");
 }
 
+#ifndef TESTFRAMEWORK
+
 int
 main(int argc, char **argv)
 {
@@ -1352,3 +1897,26 @@ main(int argc, char **argv)
 	#endif */
 	return fuse_main(myargc, myargs, &crest_filesystem_operations, NULL);
 }
+#else
+int
+main(int argc, char **argv)
+{
+	char headers[65535];
+	char teenybuffer;
+	FILE *resource=0;
+	int isdirectory=-1;
+	void *stupid=crest_filesystem_operations.init; //just to keep from complaining
+	//FILE *get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb)
+	resource=get_resource(argv[1],headers,65535,&isdirectory,argv[2]);
+	printf("IS Directory?: %d\n",isdirectory);
+	if(resource) {
+		while(fread(&teenybuffer,1,1,resource)) {
+			printf("%c",teenybuffer);
+		}
+	} else {
+		printf("NO RESOURCE FOUND. 'k?");
+	}
+	isdirectory=(int)stupid;
+	return 0;
+}
+#endif

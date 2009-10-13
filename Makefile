@@ -9,7 +9,7 @@ gcc=i686-linux-uclibc-gcc
 
 #PATH="/root/buildroot-2009.05/build_i686/staging_dir/usr/i686-linux-uclibc/bin/:$PATH"
 
-.PHONY: ALL
+.PHONY: ALL testdriven
 
 ALL: crestfs.static #crestfs 
 
@@ -37,3 +37,12 @@ test: crestfs.static
 
 debug: crestfs.static
 	gdb --args ./crestfs /tmp/doodle /tmp/cachetest
+
+testdriven: crestfs.testframework
+	cd /tmp/crestotesto && ~/universix/CREST-fs/crestfs.testframework /desk.nu/testdir HEAD
+	cd /tmp/crestotesto && gdb --args ~/universix/CREST-fs/crestfs.testframework /desk.nu/testdir/stupid/dumb/weird GET
+	cd ~/universix/CREST-fs
+
+crestfs.testframework: crestfs.c Makefile
+	$(gcc) -g -Wall -Werror -idirafter /usr/include/fuse -c -DTESTFRAMEWORK -o crestfs.testframework.o crestfs.c
+	$(gcc) -static -g -Wall -Werror -o crestfs.testframework crestfs.testframework.o libfuse.a -lpthread -ldl
