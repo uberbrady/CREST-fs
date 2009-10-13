@@ -36,7 +36,7 @@ test: crestfs.static
 	strace -o /tmp/straceo ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f &> /tmp/garbage
 
 debug: crestfs.static
-	gdb --args ./crestfs /tmp/doodle /tmp/cachetest
+	gdb --args ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f 
 
 testdriven: crestfs.testframework
 	cd /tmp/crestotesto && ~/universix/CREST-fs/crestfs.testframework /desk.nu/testdir HEAD
