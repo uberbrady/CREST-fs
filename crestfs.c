@@ -488,12 +488,13 @@ impossible_file(const char *origpath)
 		if((metaptr=fopen(metafoldbuf+1,"r"))) {
 			//ok, we opened the metadata for the directory..
 			char headerbuf[65535];
-			char datebuf[1024];
+			struct stat statbuf;
+			
+			fstat(fileno(metaptr),&statbuf);
 			fread(headerbuf,1,65535,metaptr);
 			fclose(metaptr);
 			//brintf("Buffer we are checking out is: %s",headerbuf);
-			fetchheader(headerbuf,"date",datebuf,1024);
-			if(time(0) - parsedate(datebuf) <= MAXCACHEAGE) {
+			if(time(0) - statbuf.st_mtime <= MAXCACHEAGE) {
 				//okay, the metadata is fresh...
 				brintf("Metadata is fresh enough!\n");
 				if((dataptr=fopen(dirnamebuf+1,"r"))) {
@@ -637,9 +638,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	if(impossible_file(path)) {
 		if(headers && headerlength>0) {
 			headers[0]='\0';
-			free(headerbuf);
-			return 0;
 		}
+		free(headerbuf);
+		return 0;
 	}
 	//FIXME - better than this would be to see inthe directory listing somewher eif this entry exist
 	//and has a / after it - if so, hint it to being a directory!!!!!!!!
@@ -679,16 +680,17 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	headerfile=fopenr(headerfilename,"r+"); //the cachefile may not exist - we may have just had the 'real' file, or the directory
 						//if so, that's fine, it will parse out as 'too old (1/1/1970)'
 	if(headerfile) {
-		char datebuf[80];
+		struct stat statbuf;
 		flock(fileno(headerfile),LOCK_SH);
+		fstat(fileno(headerfile),&statbuf); //assume infallible
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
 		fread(headerbuf,1,65535,headerfile);
-		fetchheader(headerbuf,"Date",datebuf,80);
-		brintf("Headers from cache are: %s, date buffer is: %s\n",headerbuf,datebuf);
-		if(time(0) - parsedate(datebuf) <= MAXCACHEAGE) {
+		brintf("Headers from cache are: %s\n",headerbuf);
+		if(time(0) - statbuf.st_mtime <= MAXCACHEAGE) {
 			//our cachefile is recent enough
 			FILE *tmp=0;
-			brintf("RECENT ENOUGH CACHE! SHORT_CIRCUIT!\n");
+			printf("RECENT ENOUGH CACHE! SHORT_CIRCUIT! time: %d, st_mtime: %ld, MAXCACHEAGE: %d, fileage: %ld\n",
+				(int)time(0),statbuf.st_mtime,MAXCACHEAGE,time(0)-statbuf.st_mtime);
 			/* If your status isn't 200 or 304, OR it actually is, but you can succesfully open your cachefile, 
 					then you may return succesfully.
 			*/
@@ -703,8 +705,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				brintf("I guess I couldn't open my cachefile...going through default behavior (bleh)\n");
 			}
 		} else {
-			brintf("Cache file is too old; continuing with normal behavior. Date: %d, now: %d, MAXCACHEAGE: %d\n",
-				(int)parsedate(datebuf),(int)time(0),MAXCACHEAGE);
+			brintf("Cache file is too old; continuing with normal behavior. Date: %ld, now: %d, MAXCACHEAGE: %d\n",
+				statbuf.st_mtime,(int)time(0),MAXCACHEAGE);
 		}
 	} else {
 		//no cachefile exists, we ahve to create one while watching out for races.
