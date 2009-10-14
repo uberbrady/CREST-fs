@@ -23,7 +23,7 @@ How do I use it?
 	
 	./crestfs whereyouwanttomountit whereyouwanttocacheit
 	then, you can cd to whereyouwanttomountit/example.com/mysubdir
-	A feature that's now in heavy use will actually attempt to cache the contents 'underneath' the mountpoint if you don't specify a cache directory, but this hasn't been tested much yet.
+	A feature that's now in heavy use will actually attempt to cache the contents 'underneath' the mountpoint if you don't specify a cache directory.
 	
 	I usually run it with options of:
 	  -s -d -f 
@@ -70,3 +70,5 @@ BUGS
 	Some of the static buffers are probably too small for practical use
 	The Makefile is horrible and needs to probably be set up with 'autoconf' or something like it
 	The max-cache age(age at which you want to check with the server) should be runtime or mount-time configurable
+	Magic numbers are used more than they should be, and this is Naughty.
+	Some bytes leak in the cache-headers files. This doesn't seem to break anything, but it's messy and I guess a little wasteful.

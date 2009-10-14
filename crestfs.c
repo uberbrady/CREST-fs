@@ -612,7 +612,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	int dirmode=0;
 	int dontuseetags=0;
 	
-	char*headerbuf=malloc(65535);
+	char *headerbuf=calloc(65535,1);
 
 	headerbuf[0]='\0';
 	if(preferredverb==0) {
@@ -681,11 +681,12 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						//if so, that's fine, it will parse out as 'too old (1/1/1970)'
 	if(headerfile) {
 		struct stat statbuf;
+		int s=-1;
 		flock(fileno(headerfile),LOCK_SH);
-		fstat(fileno(headerfile),&statbuf); //assume infallible
+		s=stat(headerfilename,&statbuf); //assume infallible
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
 		fread(headerbuf,1,65535,headerfile);
-		brintf("Headers from cache are: %s\n",headerbuf);
+		brintf("Headers from cache are: %s, statresults is: %d\n",headerbuf,s);
 		if(time(0) - statbuf.st_mtime <= MAXCACHEAGE) {
 			//our cachefile is recent enough
 			FILE *tmp=0;
@@ -705,8 +706,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				brintf("I guess I couldn't open my cachefile...going through default behavior (bleh)\n");
 			}
 		} else {
-			brintf("Cache file is too old; continuing with normal behavior. Date: %ld, now: %d, MAXCACHEAGE: %d\n",
-				statbuf.st_mtime,(int)time(0),MAXCACHEAGE);
+			brintf("Cache file is too old; continuing with normal behavior. cachefilename: %s Date: %ld, now: %d, MAXCACHEAGE: %d\n",
+				headerfilename,statbuf.st_mtime,(int)time(0),MAXCACHEAGE);
 		}
 	} else {
 		//no cachefile exists, we ahve to create one while watching out for races.
@@ -776,6 +777,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				headerend+=4;
 				//*headerend='\0'; //I think this is scribbling on the data :(
 				//brintf("And I think the headers ARE: %s",mybuffer);
+				// HERE would be the check for X-Bespin-CREST or something if you want to make sure
+				// you're not being Starbucksed.
+				// FIXME
 				brintf("We should be fputsing it to: %p\n",headerfile);
 				truncatestatus=ftruncate(fileno(headerfile),0); // we are OVERWRITING THE HEADERS - we got new headers, they're good, we wanna use 'em
 				rewind(headerfile); //I think I have to do this or it will re-fill with 0's?!
@@ -931,10 +935,33 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	//if you did, something screwed up. Try to at least return a cachefile or something.
 	//try to return the cached stuff?
 	//it could be stale.
+	
+	// OPEN QUESTION - how does this work for NONEXISTENT files when the internet isn't there?! How can I tell the difference?!
 	FILE *staledata=0;
-	brintf("BAD INTERNET CONNECTION, returning possibly-stale cache entries");
-	staledata=fopen(cachefilebase,"r");
+	brintf("BAD INTERNET CONNECTION, returning possibly-stale cache entries for webresource: %s\n",webresource);
+	brintf("Headers - which I woudl think wouldn't exist for nonexistent files - are: %s len(%d)\n",headerbuf,strlen(headerbuf));
+	if(headers && headerlength>0) {
+		brintf("Headerbuf has been filled, copying it to result headers\n");
+		brintf("Current headers are: %s",headerbuf);
+		//brintf("Did that crash us or something?\n");
+		strlcpy(headers,headerbuf,headerlength);
+	}
+	free(headerbuf);
+	//brintf("Header buffer freed\n");
+	brintf("The cache file base we'd _like_ to have open will be: %s\n",cachefilebase);
+	if(lstat(cachefilebase,&cachestat)==0 && S_ISREG(cachestat.st_mode)) {
+		staledata=fopen(cachefilebase,"r"); //could be 0
+		if(!staledata) {
+			brintf("Crap, coudln't open datafile even though we could stat it. Why?!?! %s\n",strerror(errno));
+		} else {
+			brintf("Data file opened (%p)\n",staledata);
+		}
+	} else {
+		brintf("Either couldn't stat cache or cache ain't a plain file: %s\n",strerror(errno));
+	}
 	fclose(headerfile); //RELEASE LOCK!
+	brintf("fclose'd headerfile\n");
+	brintf("About to return data file: %p\n",staledata);
 	return staledata;
 }
 
@@ -1004,7 +1031,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 						stbuf->st_size=atoi(length);
 					} else {
 						if(!cachefile) {
-							brintf("WEIRD! No cachefile given on a %d, and couldn't find content-length!!!\n",httpstatus);
+							brintf("WEIRD! No cachefile given on a %d, and couldn't find content-length!!! Let's see if there's anything interesting in errno: %s\n",httpstatus,strerror(errno));
 							exit(57);
 						}
 						seeker=fseek(cachefile,0,SEEK_END);
