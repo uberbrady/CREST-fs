@@ -37,8 +37,7 @@ Hey, I don't want The Whole Web, I just want *my* server. (server.com/sampledir/
 	ln -s mymountpoint/server.com/sampledir/ justmyserver # to have a 'justmyserver' "directory" which points to your server's directory
 	
 What features does it have?
-	(NEW) HTTP/1.1 pipelining support is built and has improved performance dramatically, especially since everything usually runs 
-	single-threaded anyways (-s).
+	(NEW) HTTP/1.1 pipelining support is built and has improved performance dramatically, especially since everything usually runs single-threaded anyways (-s).
 	
 	(NEW)etags on directory listings will be respected (so later directory listings don't require another full GET)
 
@@ -57,15 +56,15 @@ What features does it have?
 	stat()'s of files that have valid etags turn into conditional-GET's.
 	
 	HTTP redirects (that aren't your standard directory-redirects, which just add a '/' to the Location) are treated as symlinks
-	
-	etags are theoretically supported for directory listings, but my server doesn't set them yet, so this isn't tested.
-	
+		
 	Symlinks and directories are now cached normally, and the negative-directory entry caching system has been removed
 	
 	The bulk of the complexity is the get_resource() routine, which does the bulk of the work of managing caches and so on. The rest of the code
 	is mostly just a shim to get it to work with FUSE.
 	
 	There's a test harness setup that allows testing get_resource() without the rest of FUSE, using simple command-line parameters.
+	
+	nonexistent files will create negative-caching entries, reducing server traffic
 	
 BUGS
 	Unexpected conditions in the cache directories will crash the filesystem.
