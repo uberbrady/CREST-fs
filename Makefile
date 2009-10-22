@@ -5,7 +5,7 @@
 PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/:/usr/bin/:/bin/:/sbin:/usr/sbin
 
 gcc=i686-linux-uclibc-gcc
-
+CFLAGS=-D_FILE_OFFSET_BITS=64 -g
 
 #PATH="/root/buildroot-2009.05/build_i686/staging_dir/usr/i686-linux-uclibc/bin/:$PATH"
 
@@ -15,10 +15,10 @@ ALL: crestfs.static #crestfs
 
 
 crestfs.static: crestfs.c Makefile crestfs.static.o
-	$(gcc) -static -g -Wall -Werror -o crestfs.static crestfs.static.o libfuse.a -lpthread -ldl
+	$(gcc) $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o libfuse.a -lpthread -ldl
 
 crestfs.static.o: crestfs.c Makefile
-	$(gcc) -g -Wall -Werror -idirafter /usr/include/fuse -c -o crestfs.static.o crestfs.c
+	$(gcc)  -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o crestfs.static.o crestfs.c
 
 crestfs: crestfs.o Makefile
 	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
@@ -33,7 +33,7 @@ test: crestfs.static
 	#umount /tmp/doodle
 	mkdir -p /tmp/doodle
 	mkdir -p /tmp/cachetest
-	strace -o /tmp/straceo ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f &> /tmp/garbage
+	strace -o /tmp/straceo ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f 1> /tmp/1.out 2> /tmp/2.out
 
 debug: crestfs.static
 	gdb --args ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f 

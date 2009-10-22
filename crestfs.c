@@ -20,7 +20,6 @@
 
 #include <regex.h>
 
-#define _FILE_OFFSET_BITS 64
 #define FUSE_USE_VERSION  26
 #include <fuse.h>
 #include <sys/time.h>
@@ -117,6 +116,84 @@ pathparse(const char *path,char *hostname,char *pathonly,int hostlen,int pathlen
 	free(tmphostname);
 }
 
+/* keepalive support */
+
+struct keepalive {
+	char *host;
+	int fd;
+	//some sort of time thing?
+};
+
+#define MAXKEEP 3
+//we want this normaly to be higher - say, 32 or so? But I lowered it to look at a bug
+
+struct keepalive keepalives[MAXKEEP];
+int curkeep=0;
+
+int
+find_keep(char *hostname)
+{
+	int i;
+	for(i=0;i<curkeep;i++) {
+		if(keepalives[i].host && strcasecmp(hostname,keepalives[i].host)==0) {
+			int newfd=-1;
+			brintf("Found a valid keepalive at index: %d\n",i);
+			//fcntl(poo)
+			newfd=dup(keepalives[i].fd);
+			if(newfd==-1) {
+				brintf("keepalive dup failed, blanking and closing that entry(%i)\n",i);
+				free(keepalives[i].host);
+				keepalives[i].host=0;
+				close(keepalives[i].fd);
+				keepalives[i].fd=0;
+				return -1; 
+			}
+			return newfd;
+		}
+	}
+	brintf("NO valid keepalive available\n");
+	return -1;
+}
+
+int
+insert_keep(char *hostname,int fd)
+{
+	//re-use empty slots
+	int i;
+	for(i=0;i<curkeep;i++) {
+		if(keepalives[i].host==0) {
+			brintf("Reusing keepalive slot %d for insert for host %s\n",i,hostname);
+			keepalives[i].host=strdup(hostname);
+			keepalives[i].fd=dup(fd);
+			return 1;
+		}
+	}
+	if(curkeep<MAXKEEP) {
+		keepalives[curkeep].host=strdup(hostname);
+		keepalives[curkeep].fd=dup(fd);
+		curkeep++;
+		return 1;
+	}
+	return 0;
+}
+
+int
+delete_keep(char *hostname)
+{
+	int i;
+	for(i=0;i<curkeep;i++) {
+		if(keepalives[i].host && strcasecmp(hostname,keepalives[i].host)==0) {
+			brintf("Found the keepalive to delete for host %s (%d).\n",hostname,i);
+			free(keepalives[i].host);
+			keepalives[i].host=0;
+			close(keepalives[i].fd); //whoever else is using this FD can keep using it, but we don't wanna keep it open anymore
+			keepalives[i].fd=0;
+			return 1;
+		}
+	}
+	return 0;
+}
+/* end keepalive support */
 
 #define FETCHBLOCK 65535
 #define HOSTLEN 64
@@ -130,47 +207,62 @@ http_request(char *fspath,char *verb,char *etag)
 	char hostpart[1024];
 	char pathpart[1024];
 	pathparse(fspath,hostpart,pathpart,1024,1024);
-	int rv;
-	struct addrinfo hints, *servinfo, *p;
-	memset(&hints, 0, sizeof hints);
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
 	int sockfd;
 	char *reqstr=0;
 	char etagheader[1024];
 	
 	brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
+	
+	brintf("Getaddrinfo timing test: BEFORE: %ld",time(0));
+	
+	sockfd=find_keep(hostpart);
+	if(sockfd==-1) {
+		int rv;
+		struct addrinfo hints, *servinfo, *p;
+		memset(&hints, 0, sizeof hints);
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_STREAM;
 
-	if ((rv = getaddrinfo(hostpart, "80", &hints, &servinfo)) != 0) {
-		brintf("I failed to getaddrinfo: %s\n", gai_strerror(rv));
-		return 0;
-	}
-	brintf("Got getaddrinfo()...\n");
+		if ((rv = getaddrinfo(hostpart, "80", &hints, &servinfo)) != 0) {
+			brintf("Getaddrinfo timing test: FAIL-AFTER: %ld",time(0));
+			brintf("I failed to getaddrinfo: %s\n", gai_strerror(rv));
+			return 0;
+		}
+		brintf("Got getaddrinfo()...GOOD-AFTER: %ld\n",time(0));
 
-	// loop through all the results and connect to the first we can
-	for(p = servinfo; p != NULL; p = p->ai_next) {
-		if ((sockfd = socket(p->ai_family, p->ai_socktype,
-				p->ai_protocol)) == -1) {
-			perror("client: socket");
-			continue;
+		// loop through all the results and connect to the first we can
+		for(p = servinfo; p != NULL; p = p->ai_next) {
+			if ((sockfd = socket(p->ai_family, p->ai_socktype,
+					p->ai_protocol)) == -1) {
+				perror("client: socket");
+				continue;
+			}
+			struct timeval to;
+			to.tv_sec = 3;
+			setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
+			setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+
+			if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+				close(sockfd);
+				perror("client: connect");
+				continue;
+			}
+
+			break;
 		}
 
-		if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+		if (p == NULL) {
+			fprintf(stderr, "client: failed to connect\n");
 			close(sockfd);
-			perror("client: connect");
-			continue;
+			return 0;
 		}
 
-		break;
+		brintf("Okay, connectication has occurenced\n");
+		insert_keep(hostpart,sockfd);
+		freeaddrinfo(servinfo); // all done with this structure
+	} else {
+		brintf("Using kept-alive connection...\n");
 	}
-
-	if (p == NULL) {
-		fprintf(stderr, "client: failed to connect\n");
-		close(sockfd);
-		return 0;
-	}
-
-	brintf("Okay, connectication has occurenced\n");
 
 /*     getsockname(sockfd, s, sizeof s);
     brintf("client: connecting to %s\n", s);
@@ -182,8 +274,7 @@ http_request(char *fspath,char *verb,char *etag)
 	} else {
 		etagheader[0]='\0';
 	}
-	freeaddrinfo(servinfo); // all done with this structure
-	asprintf(&reqstr,"%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: CREST-fs/0.3\r\n%s\r\n",verb,pathpart,hostpart,etagheader);
+	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/0.3\r\n%s\r\n",verb,pathpart,hostpart,etagheader);
 	brintf("REQUEST: %s\n",reqstr);
 	send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
@@ -690,8 +781,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		if(time(0) - statbuf.st_mtime <= MAXCACHEAGE) {
 			//our cachefile is recent enough
 			FILE *tmp=0;
-			printf("RECENT ENOUGH CACHE! SHORT_CIRCUIT! time: %d, st_mtime: %ld, MAXCACHEAGE: %d, fileage: %ld\n",
-				(int)time(0),statbuf.st_mtime,MAXCACHEAGE,time(0)-statbuf.st_mtime);
+			printf("RECENT ENOUGH CACHE! SHORT_CIRCUIT! time: %ld, st_mtime: %ld, MAXCACHEAGE: %d, fileage: %ld\n",
+				time(0),statbuf.st_mtime,MAXCACHEAGE,time(0)-statbuf.st_mtime);
 			/* If your status isn't 200 or 304, OR it actually is, but you can succesfully open your cachefile, 
 					then you may return succesfully.
 			*/
@@ -760,6 +851,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		while ((bytes = recv(mysocket,bufpointer,65535-(bufpointer-mybuffer),0)) && bufpointer-mybuffer < 65535) {
 			char *headerend=0;
 			brintf("RECV'ed: %d bytes, into %p",bytes,bufpointer);
+			if(bytes==-1) {
+				brintf("ERROR RECEIVING - timeout or something? strerrror says: %s\n",strerror(errno));
+				break; //force pulling from cache
+			}
 			bufpointer=(bufpointer+bytes);
 			
 			//keep looking for \r\n\r\n in the header we've got...
@@ -771,15 +866,35 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				char location[1024];
 				int tmpfd=-1;
 				int truncatestatus=0;
+				char crestheader[1024]="";
+				char contentlength[1024];
+				int readlen=0;
+				char connection[1024]="";
 				
 				//found the end of the headers!
-				brintf("FOund the end of the headers! this many bytes: %d",headerend-mybuffer);
+				brintf("FOund the end of the headers! this many bytes: %d\n",headerend-mybuffer);
 				headerend+=4;
-				//*headerend='\0'; //I think this is scribbling on the data :(
 				//brintf("And I think the headers ARE: %s",mybuffer);
 				// HERE would be the check for X-Bespin-CREST or something if you want to make sure
 				// you're not being Starbucksed.
 				// FIXME
+				fetchheader(mybuffer,"Connection",connection,1024);
+				if(strcasecmp(connection,"close")==0) {
+					char host[1024];
+					char pathpart[1024];
+					brintf("HTTP/1.1 pipeline connection CLOSED, yanking from list.");
+					pathparse(path,host,pathpart,1024,1024);
+					delete_keep(host);
+				}
+				/* fetchheader(mybuffer,"x-bespin-crest",crestheader,1024);
+				if(strlen(crestheader)==0) {
+					brintf("COULD NOT Find Crest-header - you have been STARBUCKSED. Going to cache!\n");
+					break;
+				} */
+				/* problems with the anti-starbucksing protocol - need to handle redirects and 404's
+					without at least the 404 handling, you can't negatively-cache nonexistent files.
+				*/
+				crestheader[0]='\0';
 				brintf("We should be fputsing it to: %p\n",headerfile);
 				truncatestatus=ftruncate(fileno(headerfile),0); // we are OVERWRITING THE HEADERS - we got new headers, they're good, we wanna use 'em
 				rewind(headerfile); //I think I have to do this or it will re-fill with 0's?!
@@ -789,17 +904,18 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					brintf(", cuzz: %s\n",strerror(errno));
 				}
 				brintf("\n");
-				
+								
 				if(headerend-mybuffer>=65535) {
 					brintf("Header overflow, I bail.\n");
 					exit(99);
 				}
 				strncpy(headerbuf,mybuffer,headerend-mybuffer);
-				headerbuf[headerend-mybuffer+1]='\0';
+				headerbuf[headerend-mybuffer]='\0';
 				fputs(headerbuf,headerfile);
 				if(headers && headerlength>0) {
 					strncpy(headers,headerbuf,headerlength);
 				}
+				
 				//copy the newly-found headers to the headerfile and keep fetching into the file buffer
 				//unlock?!!? ***** UNlocK ******
 				//rename() file into place, rewind file pointer thingee,
@@ -807,6 +923,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				//return the file buffer
 				//write the remnants of the recv'ed header...
 				brintf("HTTP Header is: %d\n",fetchstatus(mybuffer));
+				fetchheader(headerbuf,"content-length",contentlength,1024);
+				readlen=atoi(contentlength);
+				
 				switch(fetchstatus(mybuffer)) {
 					case 200:
 					//ONE THING WE NEED TO NOTE - if this was a HEAD instead of a GET,
@@ -833,9 +952,25 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					brintf("These are how many bytes are in the Remnant: %d out of %d read\n",bufpointer-headerend,bytes);
 					brintf("Here's the data you should be writing: %hhd %hhd %hhd\n",headerend[0],headerend[1],headerend[2]);
 					brintf("Datafile is: %p\n",datafile);
-					fwrite(headerend,(bufpointer-headerend),1,datafile); //i think this is wrong, we'll have to see.
-					while((bytes = recv(mysocket,mybuffer,65535,0))) { //re-use existing buffer
-						fwrite(mybuffer,bytes,1,datafile);
+					if(bufpointer-headerend>=readlen) {
+						brintf("Remnant write is enough to satisfy request, not going into While loop.\n");
+						fwrite(headerend,readlen,1,datafile);
+					} else {
+						fwrite(headerend,(bufpointer-headerend),1,datafile);
+						while((bytes = recv(mysocket,mybuffer,65535,0))) { //re-use existing buffer
+							long int curbytes=0;
+							if(bytes==-1) {
+								brintf("Recv returned -1. FAIL?\n");
+								break;
+							}
+							fwrite(mybuffer,bytes,1,datafile);
+							curbytes=ftell(datafile);
+							brintf("Read %d bytes, expecting total of %d(%s), curerently at: %ld",bytes,readlen,contentlength,curbytes);
+							if(curbytes>=readlen) {
+								brintf("Okay, read enough data, bailing out of recv loop. Read: %ld, expecting: %d\n",ftell(datafile),readlen);
+								break;
+							}
+						}
 					}
 					if(rename(tempfile,cachefilebase)) {
 						brintf("Could not rename file to %s because: %s\n",cachefilebase,strerror(errno));
@@ -1014,7 +1149,6 @@ crest_getattr(const char *path, struct stat *stbuf)
 				int httpstatus=fetchstatus(header);
 				char date[80];
 				char length[80]="";
-				int seeker=-1;
 
 				brintf("Status: %d\n",httpstatus);
 				brintf("Header you got was: %s\n",header);
@@ -1032,19 +1166,21 @@ crest_getattr(const char *path, struct stat *stbuf)
 					} else {
 						if(!cachefile) {
 							brintf("WEIRD! No cachefile given on a %d, and couldn't find content-length!!! Let's see if there's anything interesting in errno: %s\n",httpstatus,strerror(errno));
-							exit(57);
+							//exit(57);
+							stbuf->st_size=0;
+						} else {
+							int seeker=fseek(cachefile,0,SEEK_END);
+							if(seeker) {
+								brintf("Can't seek to end of file! WTF!\n");
+								exit(88);
+							}
+							stbuf->st_size= ftell(cachefile);
 						}
-						seeker=fseek(cachefile,0,SEEK_END);
-						if(seeker) {
-							brintf("Can't seek to end of file! WTF!\n");
-							exit(88);
-						}
-						stbuf->st_size= ftell(cachefile);
 					}
 					//brintf("Post-mangulation headers is: %s\n",header+1);
 					//brintf("Post-mangulation headers is: %s\n",header);
 					//brintf("BTW, date I'm trying to format: %s\n",date);
-					brintf("WEIRD...date: %s, length: %ld\n",date,stbuf->st_size);
+					brintf("WEIRD...date: %s, length: %d\n",date,(int)stbuf->st_size);
 					stbuf->st_mtime = parsedate(date);
 					break;
 					
@@ -1126,19 +1262,35 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 static int
 crest_open(const char *path, struct fuse_file_info *fi)
 {
-//	if (strcmp(path, file_path) != 0) { /* We only recognize one file. */
-//		return -ENOENT;
-//	}
-	struct stat st;
-	return 0;
-	if(crest_getattr(path,&st) == -ENOENT) {
-		return -ENOENT;
+	FILE *rsrc=0;
+	int is_directory=-1;
+	if ((fi->flags & O_ACCMODE) != O_RDONLY) { /* Only reading allowed. */
+		return -EACCES;
 	}
-    if ((fi->flags & O_ACCMODE) != O_RDONLY) { /* Only reading allowed. */
-        return -EACCES;
-    }
+	rsrc=get_resource(path,0,0,&is_directory,"GET");
+	if(is_directory) {
+		if(rsrc) {
+			fclose(rsrc);
+		}
+		return -EISDIR;
+	}
+	if(rsrc) {
+		brintf("Going to set filehandle to POINTER: %p\n",rsrc);
+		fi->fh=(long int)rsrc;
+		return 0;
+	} else {
+		brintf("Uh, no resource retrieved? Setting fh to zero?\n");
+		fi->fh=0;
+		return 0;
+	}
+	return -EACCES;
+}
 
-    return 0;
+static int
+crest_release(const char *path, struct fuse_file_info *fi)
+{
+	brintf("Closing filehandle %p: for file: %s\n",(FILE *)(unsigned int)fi->fh,path);
+	return fclose((FILE *)(unsigned int)fi->fh);
 }
 
 static int
@@ -1147,6 +1299,9 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 {
 	FILE *dirfile=0;
 	int is_directory=-1;
+	if(fi) {
+		brintf("Well, dunno why this is, but we have file info: %p, filehandle: %d\n",fi,(int)fi->fh);
+	}
 
 	//should do a directory listing in the domains directory (the first one)
 	// but let's do that later.
@@ -1251,25 +1406,20 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
            struct fuse_file_info *fi)
 {
 	FILE *cachefile;
-	int is_directory=-1;
 	
-	cachefile=get_resource(path,0,0,&is_directory,"GET");
-
-	if(is_directory) {
-		if(cachefile) {
-			fclose(cachefile);
-		}
-		return -EISDIR;
+	if(fi) {
+		brintf("Good filehandle for path: %s, pointer:%p\n",path,(FILE *)(unsigned int)fi->fh);
+	} else {
+		brintf("BAD FILE*INFO* IS ZERO for path: %s\n",path);
+		brintf("File was not properly opened?\n");
+		return -EIO;
 	}
+	cachefile=(FILE *)(unsigned int)fi->fh;
+
 	if(fseek(cachefile,offset,SEEK_SET)==0) {
-		int bytesread=fread(buf,1,size,cachefile);
-		fclose(cachefile);
-		return 	bytesread;
+		return fread(buf,1,size,cachefile);
 	} else {
 		//fail to seek - what'ssat mean?
-		if(cachefile) {
-			fclose(cachefile);
-		}
 		return 0;
 	}
 }
@@ -1279,6 +1429,7 @@ int	cachedir = 0;
 static void *
 crest_init(struct fuse_conn_info *conn)
 {
+	brintf("I'm not intending to do anything with this connection: %p\n",conn);
 	fchdir(cachedir);
 	close(cachedir);
 	return 0;
@@ -1289,6 +1440,7 @@ static struct fuse_operations crest_filesystem_operations = {
     .getattr = crest_getattr, /* To provide size, permissions, etc. */
     .readlink= crest_readlink,/* to handle funny server redirects */
     .open    = crest_open,    /* To enforce read-only access.       */
+    .release = crest_release, /* to hold on to a filehandle to the cache so that reads are consistent with one generation of the file */
     .read    = crest_read,    /* To provide file content.           */
     .readdir = crest_readdir, /* To provide directory listing.      */
 };

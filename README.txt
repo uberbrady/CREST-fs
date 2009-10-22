@@ -37,6 +37,11 @@ Hey, I don't want The Whole Web, I just want *my* server. (server.com/sampledir/
 	ln -s mymountpoint/server.com/sampledir/ justmyserver # to have a 'justmyserver' "directory" which points to your server's directory
 	
 What features does it have?
+	(NEW) HTTP/1.1 pipelining support is built and has improved performance dramatically, especially since everything usually runs 
+	single-threaded anyways (-s).
+	
+	(NEW)etags on directory listings will be respected (so later directory listings don't require another full GET)
+
 	The cache file system looks almost exactly like the live filesystem, so you can boot off of it.
 	
 	Metadata for files (HTTP Headers section) is stored under .crestfs_metadata_rootnode/{PATH}
@@ -65,10 +70,10 @@ What features does it have?
 BUGS
 	Unexpected conditions in the cache directories will crash the filesystem.
 	Multi-threaded support is totally untested
-	etags support for directories is untested
+	The Keep-alive array and structure is totally un-thread-safe, and is not prepared to handle multiple sockets to the same host.
 	Directory listings can't be larger than 1MB
 	Some of the static buffers are probably too small for practical use
 	The Makefile is horrible and needs to probably be set up with 'autoconf' or something like it
 	The max-cache age(age at which you want to check with the server) should be runtime or mount-time configurable
 	Magic numbers are used more than they should be, and this is Naughty.
-	Some bytes leak in the cache-headers files. This doesn't seem to break anything, but it's messy and I guess a little wasteful.
+	Symlinks to directories probably don't work.
