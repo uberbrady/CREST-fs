@@ -14,11 +14,27 @@ CFLAGS=-D_FILE_OFFSET_BITS=64 -g
 ALL: crestfs.static #crestfs 
 
 
-crestfs.static: crestfs.c Makefile crestfs.static.o
+
+crestfs.memtest: Makefile crestfs.memtest.o
+	gcc $(CFLAGS) -Wall -Werror -o crestfs.memtest crestfs.memtest.o -lfuse -ldl -lpthread -lrt
+	
+crestfs.memtest.o: Makefile crestfs.c
+	gcc -Wall -W -Werror -c $(CFLAGS) -DMEMTEST -o crestfs.memtest.o crestfs.c
+	
+memtest: crestfs.memtest
+	export MALLOC_TRACE=/tmp/memlog
+	 ./crestfs.memtest /tmp/doodle /tmp/cachetest -s -d -f
+
+
+	
+crestfs.static: Makefile crestfs.static.o
 	$(gcc) $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o libfuse.a -lpthread -ldl
 
 crestfs.static.o: crestfs.c Makefile
 	$(gcc)  -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o crestfs.static.o crestfs.c
+
+
+
 
 crestfs: crestfs.o Makefile
 	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
@@ -29,11 +45,16 @@ crestfs.o: crestfs.c Makefile
 	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	
+
+
+
+
 test: crestfs.static
 	#umount /tmp/doodle
 	mkdir -p /tmp/doodle
 	mkdir -p /tmp/cachetest
 	strace -o /tmp/straceo ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f 1> /tmp/1.out 2> /tmp/2.out
+	#ulimit ?
 
 debug: crestfs.static
 	gdb --args ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f 

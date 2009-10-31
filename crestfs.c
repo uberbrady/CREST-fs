@@ -78,7 +78,7 @@ asprintf(char **ret, const char *format, ...)
 	return vsnprintf(*ret,32767,format,v);
 }
 
-char * strptime(char *,char *,struct tm *);
+//char * strptime(char *,char *,struct tm *);
 #else
 #include <stdarg.h>
 #endif
@@ -207,13 +207,16 @@ http_request(char *fspath,char *verb,char *etag)
 	char hostpart[1024];
 	char pathpart[1024];
 	pathparse(fspath,hostpart,pathpart,1024,1024);
-	int sockfd;
+	int sockfd=-1;
 	char *reqstr=0;
 	char etagheader[1024];
+	long start=0;
+	int keptalive=0;
 	
 	brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
 	
-	brintf("Getaddrinfo timing test: BEFORE: %ld",time(0));
+	start=time(0);
+	brintf("Getaddrinfo timing test: BEFORE: %ld",start);
 	
 	sockfd=find_keep(hostpart);
 	if(sockfd==-1) {
@@ -224,11 +227,11 @@ http_request(char *fspath,char *verb,char *etag)
 		hints.ai_socktype = SOCK_STREAM;
 
 		if ((rv = getaddrinfo(hostpart, "80", &hints, &servinfo)) != 0) {
-			brintf("Getaddrinfo timing test: FAIL-AFTER: %ld",time(0));
+			brintf("Getaddrinfo timing test: FAIL-AFTER: %ld",time(0)-start);
 			brintf("I failed to getaddrinfo: %s\n", gai_strerror(rv));
 			return 0;
 		}
-		brintf("Got getaddrinfo()...GOOD-AFTER: %ld\n",time(0));
+		brintf("Got getaddrinfo()...GOOD-AFTER: %ld\n",time(0)-start);
 
 		// loop through all the results and connect to the first we can
 		for(p = servinfo; p != NULL; p = p->ai_next) {
@@ -238,6 +241,7 @@ http_request(char *fspath,char *verb,char *etag)
 				continue;
 			}
 			struct timeval to;
+			memset(&to,0,sizeof(to));
 			to.tv_sec = 3;
 			setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
 			setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
@@ -257,11 +261,12 @@ http_request(char *fspath,char *verb,char *etag)
 			return 0;
 		}
 
-		brintf("Okay, connectication has occurenced\n");
+		brintf("Okay, connectication has occurenced: %ld\n",time(0)-start);
 		insert_keep(hostpart,sockfd);
 		freeaddrinfo(servinfo); // all done with this structure
 	} else {
-		brintf("Using kept-alive connection...\n");
+		brintf("Using kept-alive connection...%d\n",sockfd);
+		keptalive=1;
 	}
 
 /*     getsockname(sockfd, s, sizeof s);
@@ -275,9 +280,23 @@ http_request(char *fspath,char *verb,char *etag)
 		etagheader[0]='\0';
 	}
 	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/0.3\r\n%s\r\n",verb,pathpart,hostpart,etagheader);
-	brintf("REQUEST: %s\n",reqstr);
-	send(sockfd,reqstr,strlen(reqstr),0);
+	//brintf("REQUEST: %s\n",reqstr);
+	int sendresults=send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
+	
+	if(sendresults==-1) {
+		brintf("Bad socket?! BELETING!\n");
+		delete_keep(hostpart);
+		close(sockfd);
+		if(keptalive) {
+			//now that we've deleted the keepalive we came from, retry the request
+			//hopefully it will take the 'no keepalive found' path...and not infinite loop.
+			//which would be bad.
+			return http_request(fspath,verb,etag);
+		} else {
+			return 0;
+		}
+	}
 
 	return sockfd;
 	
@@ -430,7 +449,7 @@ void redirmake(const char *path)
 		mkfold=mkdir(foldbuf,0700);
 		brintf("Folderbuffer is: %s, status is: %d\n",foldbuf,mkfold);
 		if(mkfold!=0) {
-			brintf("Here's why: %s\n",strerror(errno));
+			//brintf("Here's why: %s\n",strerror(errno));
 		}
 		slashloc+=1;//iterate past the slash we're on
 	}
@@ -496,16 +515,16 @@ directory_iterator(char *directoryfile,iterator *iter,char *buf,int buflen)
 	char linkname[255];
 	int status=0;
 
-	brintf("Weboffset: %d\n",iter->weboffset);
+	//brintf("Weboffset: %d\n",iter->weboffset);
 	while(regexec(&iter->re,directoryfile+iter->weboffset,3,iter->rm,0)==0) {
 		reanswer(directoryfile+iter->weboffset,&iter->rm[1],hrefname,255);
 		reanswer(directoryfile+iter->weboffset,&iter->rm[2],linkname,255);
 		iter->weboffset+=iter->rm[0].rm_eo;
 
-		brintf("href: %s link: %s\n",hrefname,linkname);
+		//brintf("href: %s link: %s\n",hrefname,linkname);
 		if(strcmp(hrefname,linkname)==0) {
 			iter->filecounter++;
-			brintf("ELEMENT: %s\n",hrefname);
+			//brintf("ELEMENT: %s\n",hrefname);
 			strlcpy(buf,hrefname,buflen);
 			return 1;
 		}
@@ -534,10 +553,10 @@ impossible_file(const char *origpath)
 	strlcpy(path,origpath,1024);
 	strlcat(path,"/",1024); //just to fool the while loop, I know it's ugly, I'm sorry.
 	char *slashloc=(char *)path+1;
-	char *dirbuffer=malloc(DIRBUFFER); //DIRBUFFER (1 MB) directory page
+	char *dirbuffer=calloc(DIRBUFFER,1); //DIRBUFFER (1 MB) directory page
 	regex_t re;
 
-	brintf("TESTIG FILE IMPOSSIBILITY FOR: %s\n",slashloc);
+	//brintf("TESTIG FILE IMPOSSIBILITY FOR: %s\n",slashloc);
 	int status=regcomp(&re,DIRREGEX,REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
 	if(status!=0) {
 		char error[80];
@@ -567,14 +586,14 @@ impossible_file(const char *origpath)
 		strlcpy(basenamebuf,foldbuf,1024);
 		bn=basename(basenamebuf);
 
-		brintf("Component: %s, basename: %s, dirname: %s\n",foldbuf,bn,dn);
+		//brintf("Component: %s, basename: %s, dirname: %s\n",foldbuf,bn,dn);
 		
 		strlcat(dirnamebuf,DIRCACHEFILE,1024);
 		strlcpy(metafoldbuf,METAPREPEND,1024);
 		strlcat(metafoldbuf,"/",1024);
 		strlcat(metafoldbuf,dirnamebuf,1024);
 		
-		brintf("metafolder: %s, dirname is: %s\n",metafoldbuf+1,dirnamebuf+1);
+		//brintf("metafolder: %s, dirname is: %s\n",metafoldbuf+1,dirnamebuf+1);
 		
 		if((metaptr=fopen(metafoldbuf+1,"r"))) {
 			//ok, we opened the metadata for the directory..
@@ -587,7 +606,7 @@ impossible_file(const char *origpath)
 			//brintf("Buffer we are checking out is: %s",headerbuf);
 			if(time(0) - statbuf.st_mtime <= MAXCACHEAGE) {
 				//okay, the metadata is fresh...
-				brintf("Metadata is fresh enough!\n");
+				//brintf("Metadata is fresh enough!\n");
 				if((dataptr=fopen(dirnamebuf+1,"r"))) {
 					//okay, we managed to open the directory data...
 					int failcounter=0;
@@ -601,14 +620,14 @@ impossible_file(const char *origpath)
 					//if(offset<++failcounter) filler(buf,"poople",NULL,failcounter);
 					//return 0; //infinite loop?
 					int weboffset=0;
-					brintf("Able to look at directory contents, while loop starting...\n");
+					//brintf("Able to look at directory contents, while loop starting...\n");
 					while(status==0 && failcounter < TOOMANYFILES) {
 						failcounter++;
 						char hrefname[255];
 						char linkname[255];
 
 						weboffset+=rm[0].rm_eo;
-						brintf("Weboffset: %d\n",weboffset);
+						//brintf("Weboffset: %d\n",weboffset);
 						status=regexec(&re,dirbuffer+weboffset,3,rm,0); // ???
 						if(status==0) {
 							reanswer(dirbuffer+weboffset,&rm[1],hrefname,255);
@@ -616,15 +635,15 @@ impossible_file(const char *origpath)
 
 							//brintf("Href? %s\n",hrefname);
 							//brintf("Link %s\n",linkname);
-							brintf("href: %s link: %s\n",hrefname,linkname);
+							//brintf("href: %s link: %s\n",hrefname,linkname);
 							if(strcmp(hrefname,linkname)==0) {
 								char slashedname[1024];
 								strlcpy(slashedname,bn,1024);
 								strlcat(slashedname,"/",1024);
-								brintf("ELEMENT: %s, comparing to %s\n",hrefname,bn);
+								//brintf("ELEMENT: %s, comparing to %s\n",hrefname,bn);
 								if(strcmp(hrefname,bn)==0 || strcmp(hrefname,slashedname)==0) {
 									//file seems to exist, let's not bother here anymore
-									brintf("FOUND IT! Moving to next one...\n");
+									//brintf("FOUND IT! Moving to next one...\n");
 									foundit=1;
 									break;
 								}
@@ -632,7 +651,7 @@ impossible_file(const char *origpath)
 						} else {
 							char error[80];
 							regerror(status,&re,error,80);
-							brintf("Regex status is: %d, error is %s\n",status,error);
+							//brintf("Regex status is: %d, error is %s\n",status,error);
 						}
 						//brintf("staus; %d, 0: %d, 1:%d, 2: %d, href=%s, link=%s\n",status,rm[0].rm_so,rm[1].rm_so,rm[2].rm_so,hrefname,linkname);
 						//filler?
@@ -642,8 +661,9 @@ impossible_file(const char *origpath)
 						//okay, you walked through a FRESH directory listing, looking at all the files
 						//and did NOT see one of the components you've asked about. So this file is
 						//*IMPOSSIBLE*
-						brintf("This file seems pretty impossible to me.!\n");
+						brintf("The file '%s' seems pretty impossible to me.!\n",origpath);
 						free(dirbuffer);
+						regfree(&re);
 						return 1;
 					}
 					
@@ -659,8 +679,9 @@ impossible_file(const char *origpath)
 
 		slashloc+=1;//iterate past the slash we're on
 	}
-	brintf("File appears not to be impossible, move along...\n");
+	brintf("File '%s' appears not to be impossible, move along...\n",origpath);
 	free(dirbuffer);
+	regfree(&re);
 	return 0; //must not be impossible, or we would've returned previously
 }
 
@@ -777,7 +798,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		s=stat(headerfilename,&statbuf); //assume infallible
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
 		fread(headerbuf,1,65535,headerfile);
-		brintf("Headers from cache are: %s, statresults is: %d\n",headerbuf,s);
+		//brintf("Headers from cache are: %s, statresults is: %d\n",headerbuf,s);
 		if(time(0) - statbuf.st_mtime <= MAXCACHEAGE) {
 			//our cachefile is recent enough
 			FILE *tmp=0;
@@ -1050,11 +1071,13 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						rmdir(headerdirname);
 						brintf("I should be yanking directories %s and %s\n",path+1,headerdirname);
 						close(mysocket);
+						free(headerbuf);
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb);
 					}
 					brintf("404 mode, I *may* be closing the cache header file...\n");
 					brintf(" Results: %d",fclose(headerfile)); //Need to release locks on 404's too!
 					close(mysocket);
+					free(headerbuf);
 					return 0; //nonexistent file, return 0, hold on to cache, no datafile exists.
 					break;
 					
@@ -1326,7 +1349,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		return 0;
 	}
 
-	char *dirbuffer=malloc(DIRBUFFER);
+	char *dirbuffer=calloc(DIRBUFFER,1);
 	if(dirbuffer==0) {
 		brintf("Great, can't malloc our dirbuffer. baililng.\n");
 		exit(19);
@@ -1343,6 +1366,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		if(dirfile) {
 			fclose(dirfile);
 		}
+		free(dirbuffer);
 		return -ENOTDIR;
 	}
 
@@ -1369,7 +1393,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		char linkname[255];
 		
 		weboffset+=rm[0].rm_eo;
-		brintf("Weboffset: %d\n",weboffset);
+		//brintf("Weboffset: %d\n",weboffset);
 		status=regexec(&re,dirbuffer+weboffset,3,rm,0); // ???
 		if(status==0) {
 			reanswer(dirbuffer+weboffset,&rm[1],hrefname,255);
@@ -1377,9 +1401,9 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 			//brintf("Href? %s\n",hrefname);
 			//brintf("Link %s\n",linkname);
-			brintf("href: %s link: %s\n",hrefname,linkname);
+			//brintf("href: %s link: %s\n",hrefname,linkname);
 			if(strcmp(hrefname,linkname)==0) {
-				brintf("ELEMENT: %s\n",hrefname);
+				//brintf("ELEMENT: %s\n",hrefname);
 				if(offset<failcounter) 
 					if(filler(buf, hrefname, NULL, failcounter)!=0) {
 						brintf("Filler said not zero.\n");
@@ -1391,11 +1415,12 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		//filler?
 		//filler(buf,rm[])
 	}
-	brintf("while loop - complete\n");
+	//brintf("while loop - complete\n");
 	if(failcounter>=TOOMANYFILES) {
 		brintf("Fail due to toomany\n");
 	}
 	free(dirbuffer);
+	regfree(&re);
 	return 0; //success? or does that mean fail?
 }
 
@@ -1415,12 +1440,16 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 		return -EIO;
 	}
 	cachefile=(FILE *)(unsigned int)fi->fh;
-
-	if(fseek(cachefile,offset,SEEK_SET)==0) {
-		return fread(buf,1,size,cachefile);
+	
+	if(cachefile) {
+		if(fseek(cachefile,offset,SEEK_SET)==0) {
+			return fread(buf,1,size,cachefile);
+		} else {
+			//fail to seek - what'ssat mean?
+			return 0;
+		}
 	} else {
-		//fail to seek - what'ssat mean?
-		return 0;
+		return -EIO;
 	}
 }
 
@@ -1556,6 +1585,10 @@ addparam(int *argc,char ***argv,char *string)
 
 #ifndef TESTFRAMEWORK
 
+#if defined(MEMTEST)
+#include <mcheck.h>
+#endif
+
 int
 main(int argc, char **argv)
 {
@@ -1601,6 +1634,13 @@ main(int argc, char **argv)
 	addparam(&myargc,&myargs,"-o");
 	addparam(&myargc,&myargs,"nonempty");
 	#endif
+	#if defined(MEMTEST)
+	mtrace();
+	//void *crapweasel=0;
+	//crapweasel=malloc(123);
+	printf("I JUST SET MTRACE!!!!!\n");
+	#endif
+	//#endif
 /* 	#ifdef __APPLE__
 	char *myargs[]= {0, 0, "-r", "-s", "-f", "-d","-o","nolocalcaches", 0 };
 	#define ARGCOUNT 8
