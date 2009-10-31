@@ -1286,16 +1286,25 @@ static int
 crest_open(const char *path, struct fuse_file_info *fi)
 {
 	FILE *rsrc=0;
+	char headers[4096];
+	
 	int is_directory=-1;
 	if ((fi->flags & O_ACCMODE) != O_RDONLY) { /* Only reading allowed. */
 		return -EACCES;
 	}
-	rsrc=get_resource(path,0,0,&is_directory,"GET");
+	rsrc=get_resource(path,headers,4096,&is_directory,"GET");
 	if(is_directory) {
 		if(rsrc) {
 			fclose(rsrc);
 		}
 		return -EISDIR;
+	}
+	if(fetchstatus(headers)==404) {
+		if(rsrc) {
+			brintf("Wow - weird, got a 404 but a valid resource? I guess\n");
+			fclose(rsrc);
+		}
+		return -ENOENT;
 	}
 	if(rsrc) {
 		brintf("Going to set filehandle to POINTER: %p\n",rsrc);
@@ -1306,14 +1315,17 @@ crest_open(const char *path, struct fuse_file_info *fi)
 		fi->fh=0;
 		return 0;
 	}
-	return -EACCES;
 }
 
 static int
 crest_release(const char *path, struct fuse_file_info *fi)
 {
 	brintf("Closing filehandle %p: for file: %s\n",(FILE *)(unsigned int)fi->fh,path);
-	return fclose((FILE *)(unsigned int)fi->fh);
+	if(fi->fh) {
+		return fclose((FILE *)(unsigned int)fi->fh);
+	} else {
+		return 0;
+	}
 }
 
 static int
