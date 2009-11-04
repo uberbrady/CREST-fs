@@ -11,8 +11,10 @@ CFLAGS=-D_FILE_OFFSET_BITS=64 -g
 
 .PHONY: ALL testdriven
 
-ALL: crestfs.static #crestfs 
+ALL: crestfs
 
+crestfs: crestfs.static
+	cp crestfs.static crestfs
 
 
 crestfs.memtest: Makefile crestfs.memtest.o
@@ -36,14 +38,24 @@ crestfs.static.o: crestfs.c Makefile
 
 
 
-crestfs: crestfs.o Makefile
+crestfs.dynamic: crestfs.o Makefile
 	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
-	gcc -g -Wall -Werror -o crestfs crestfs.o -lfuse
+	gcc -g -Wall -Werror -o crestfs.dynamic crestfs.o -lfuse
 	#gcc -static -g -Wall -Werror -o crestfs.static crestfs.o -lfuse
 
 crestfs.o: crestfs.c Makefile
 	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
-	gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
+	gcc $(CFLAGS) -Wall -Werror -c -o crestfs.o crestfs.c
+	
+
+
+boottest: crestfs.static
+	rm -rf /tmp/bootcache
+	mkdir -p /tmp/bootcache
+	cp -R /root/universix/infinix_primed_bootstrap/{desk.nu,.crestfs_metadata_rootnode} /tmp/bootcache
+	./crestfs.static /http /tmp/bootcache -s -d -f 1> /tmp/b1.out 2> /tmp/b2.out &
+	PATH="${PATH}:/root/universix/infinix_filesystem/sbin/" /root/universix/infinix_filesystem/sbin/update
+	
 	
 
 

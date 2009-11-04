@@ -193,6 +193,7 @@ delete_keep(char *hostname)
 	}
 	return 0;
 }
+
 /* end keepalive support */
 
 #define FETCHBLOCK 65535
@@ -202,7 +203,7 @@ delete_keep(char *hostname)
 #include <resolv.h>
 
 int
-http_request(char *fspath,char *verb,char *etag)
+http_request(char *fspath,char *verb,char *etag, char *referer)
 {
 	char hostpart[1024];
 	char pathpart[1024];
@@ -213,10 +214,10 @@ http_request(char *fspath,char *verb,char *etag)
 	long start=0;
 	int keptalive=0;
 	
-	brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
+	//brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
 	
 	start=time(0);
-	brintf("Getaddrinfo timing test: BEFORE: %ld",start);
+	//brintf("Getaddrinfo timing test: BEFORE: %ld\n",start);
 	
 	sockfd=find_keep(hostpart);
 	if(sockfd==-1) {
@@ -227,8 +228,8 @@ http_request(char *fspath,char *verb,char *etag)
 		hints.ai_socktype = SOCK_STREAM;
 
 		if ((rv = getaddrinfo(hostpart, "80", &hints, &servinfo)) != 0) {
-			brintf("Getaddrinfo timing test: FAIL-AFTER: %ld",time(0)-start);
-			brintf("I failed to getaddrinfo: %s\n", gai_strerror(rv));
+			brintf("Getaddrinfo timing test: FAIL-AFTER: %ld - couldn't lookup %s because: %s\n",
+				time(0)-start,hostpart,gai_strerror(rv));
 			return 0;
 		}
 		brintf("Got getaddrinfo()...GOOD-AFTER: %ld\n",time(0)-start);
@@ -279,20 +280,36 @@ http_request(char *fspath,char *verb,char *etag)
 	} else {
 		etagheader[0]='\0';
 	}
-	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/0.3\r\n%s\r\n",verb,pathpart,hostpart,etagheader);
+	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/0.4\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,etagheader);
 	//brintf("REQUEST: %s\n",reqstr);
 	int sendresults=send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
+	brintf("from start to send delay was: %ld\n",time(0)-start);
 	
-	if(sendresults==-1) {
-		brintf("Bad socket?! BELETING!\n");
+	brintf("Sendresults on socket are: %d, keptalive is: %d\n",sendresults,keptalive);
+	char peekbuf[8];
+	int peekresults=0;
+	do {
+		peekresults=recv(sockfd, peekbuf, sizeof(peekbuf), MSG_PEEK);
+	} while (peekresults==-1 && errno== EAGAIN );
+	if(peekresults>0) {
+		brintf("Buffer peek says: %c%c%c%c\n",peekbuf[0],peekbuf[1],peekbuf[2],peekbuf[3]);
+	} else {
+		brintf("peek failed :(\n");
+	}
+	brintf("Recv delay from start was: %ld\n",time(0)-start);
+	if(sendresults<=0 || peekresults<=0) {
+		brintf("Bad socket?! BELETING! sendresults: %d, peekresults: %d (Reason: %s)\n",sendresults,peekresults,strerror(errno));
 		delete_keep(hostpart);
 		close(sockfd);
 		if(keptalive) {
 			//now that we've deleted the keepalive we came from, retry the request
 			//hopefully it will take the 'no keepalive found' path...and not infinite loop.
 			//which would be bad.
-			return http_request(fspath,verb,etag);
+			char modrefer[1024];
+			strlcpy(modrefer,referer,1024);
+			strlcat(modrefer,"+refetch",1024);
+			return http_request(fspath,verb,etag,modrefer);
 		} else {
 			return 0;
 		}
@@ -429,6 +446,7 @@ int
 parsedate(char *datestring)
 {
 	struct tm mytime;
+	memset(&mytime,0,sizeof(mytime));
 	char *formatto=strptime(datestring,"%a, %e %b %Y %H:%M:%S %Z",&mytime);
 	if(formatto==0) {
 		return 0;
@@ -447,7 +465,7 @@ void redirmake(const char *path)
 		strlcpy(foldbuf,path,1024);
 		foldbuf[slashoffset-1]='\0'; //why? I guess the pointer is being advanced PAST the slash?
 		mkfold=mkdir(foldbuf,0700);
-		brintf("Folderbuffer is: %s, status is: %d\n",foldbuf,mkfold);
+		//brintf("Folderbuffer is: %s, status is: %d\n",foldbuf,mkfold);
 		if(mkfold!=0) {
 			//brintf("Here's why: %s\n",strerror(errno));
 		}
@@ -604,7 +622,7 @@ impossible_file(const char *origpath)
 			fread(headerbuf,1,65535,metaptr);
 			fclose(metaptr);
 			//brintf("Buffer we are checking out is: %s",headerbuf);
-			if(time(0) - statbuf.st_mtime <= MAXCACHEAGE) {
+			if(time(0) - statbuf.st_mtime <= MAXCACHEAGE && statbuf.st_size > 8) {
 				//okay, the metadata is fresh...
 				//brintf("Metadata is fresh enough!\n");
 				if((dataptr=fopen(dirnamebuf+1,"r"))) {
@@ -674,7 +692,7 @@ impossible_file(const char *origpath)
 				brintf("Metadata file is too stale to be sure\n");
 			}
 		} else {
-			brintf("Could not open metadata file\n");
+			//brintf("Could not open metadata file %s\n",metafoldbuf+1);
 		}
 
 		slashloc+=1;//iterate past the slash we're on
@@ -709,7 +727,7 @@ impossible_file(const char *origpath)
 
 
 FILE *
-get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb)
+get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose)
 {
 	//first, check cache. How's that looking?
 	struct stat cachestat;
@@ -794,20 +812,21 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	if(headerfile) {
 		struct stat statbuf;
 		int s=-1;
-		flock(fileno(headerfile),LOCK_SH);
+		//flock(fileno(headerfile),LOCK_SH);
 		s=stat(headerfilename,&statbuf); //assume infallible
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
 		fread(headerbuf,1,65535,headerfile);
 		//brintf("Headers from cache are: %s, statresults is: %d\n",headerbuf,s);
-		if(time(0) - statbuf.st_mtime <= MAXCACHEAGE) {
-			//our cachefile is recent enough
+		if(time(0) - statbuf.st_mtime <= MAXCACHEAGE && statbuf.st_size > 8) {
+			//our cachefile is recent enough and big enough
 			FILE *tmp=0;
 			printf("RECENT ENOUGH CACHE! SHORT_CIRCUIT! time: %ld, st_mtime: %ld, MAXCACHEAGE: %d, fileage: %ld\n",
 				time(0),statbuf.st_mtime,MAXCACHEAGE,time(0)-statbuf.st_mtime);
 			/* If your status isn't 200 or 304, OR it actually is, but you can succesfully open your cachefile, 
 					then you may return succesfully.
 			*/
-			if((fetchstatus(headerbuf)!=200 && fetchstatus(headerbuf)!=304) || (tmp=fopen(cachefilebase,"r"))) {
+			if((fetchstatus(headerbuf)!=200 && fetchstatus(headerbuf)!=304) || (tmp=fopen(cachefilebase,"r")) 
+					|| strcmp(preferredverb,"HEAD")==0) {
 				if(headers && headerlength>0) {
 					strncpy(headers,headerbuf,headerlength);
 				}
@@ -816,10 +835,11 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				return tmp;
 			} else {
 				brintf("I guess I couldn't open my cachefile...going through default behavior (bleh)\n");
+				dontuseetags=1;
 			}
 		} else {
-			brintf("Cache file is too old; continuing with normal behavior. cachefilename: %s Date: %ld, now: %d, MAXCACHEAGE: %d\n",
-				headerfilename,statbuf.st_mtime,(int)time(0),MAXCACHEAGE);
+			brintf("Cache file is too old (or too small); continuing with normal behavior. cachefilename: %s Age: %ld MAXCACHEAGE: %d, filesize: %d\n",
+				headerfilename,(int)time(0)-statbuf.st_mtime,MAXCACHEAGE,(int)statbuf.st_size);
 		}
 	} else {
 		//no cachefile exists, we ahve to create one while watching out for races.
@@ -832,7 +852,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			brintf("RACE CAUGHT ON FILE CREATION! NOt sure what to do about it though... reason: %s\n",strerror(errno));
 			headerfile=fopenr(headerfilename,"w"); //this means a race was found and prevented(?)
 		}
-		flock(fileno(headerfile),LOCK_SH); //shared lock will immediately be upgraded...
+		//flock(fileno(headerfile),LOCK_SH); //shared lock will immediately be upgraded...
 	}
 	if(!headerfile) {
 		brintf("FAIL TO OPEN DE HEADER-CACHEFILE!");
@@ -858,12 +878,15 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		strncpy(selectedverb,"GET",80);
 	}
 	
-	mysocket=http_request(webresource,selectedverb,etag);
+	mysocket=http_request(webresource,selectedverb,etag,purpose);
+	
+	brintf("Http request returned socket: %d\n",mysocket);
 	
 	if(mysocket > 0) {
-		char mybuffer[65535];
+		char *mybuffer=calloc(65535,1);
 		int bytes=0;
 		char *bufpointer=mybuffer;
+		
 		//first fetch headers into headerfile, then fetch body into body file
 		//wait,we cant do that. if we're "accelerating" a supposed directory, or we're GET'ing an entity that turns out to be a directory,
 		//we won't want to write the headerfiles here.
@@ -871,10 +894,15 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		//also, if this turned out to be a HEAD, we can't write to the data-cachefile
 		while ((bytes = recv(mysocket,bufpointer,65535-(bufpointer-mybuffer),0)) && bufpointer-mybuffer < 65535) {
 			char *headerend=0;
-			brintf("RECV'ed: %d bytes, into %p",bytes,bufpointer);
-			if(bytes==-1) {
-				brintf("ERROR RECEIVING - timeout or something? strerrror says: %s\n",strerror(errno));
-				break; //force pulling from cache
+			brintf("RECV'ed: %d bytes, into %p\n",bytes,bufpointer);
+			if(bytes==-1 && errno == EAGAIN) {
+				brintf("EAGAIN while receving, retrying\n");
+				continue; //force pulling from cache
+			}
+			if(bytes<=0) {
+				//the EAGAIN option we handled already, above.
+				//otherwise BREAK
+				break;
 			}
 			bufpointer=(bufpointer+bytes);
 			
@@ -944,7 +972,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				//return the file buffer
 				//write the remnants of the recv'ed header...
 				brintf("HTTP Header is: %d\n",fetchstatus(mybuffer));
-				fetchheader(headerbuf,"content-length",contentlength,1024);
+				fetchheader(mybuffer,"content-length",contentlength,1024);
+				brintf("Content length is: %s\n",contentlength);
 				readlen=atoi(contentlength);
 				
 				switch(fetchstatus(mybuffer)) {
@@ -957,6 +986,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						brintf("DUDE TOTALLY SUCKY!!!! Somebody HEAD'ed a resource and we had to unlink its data file.\n");
 						unlink(cachefilebase);
 						close(mysocket);
+						free(mybuffer);
 						return 0;// NO CONTENTS TO DEAL WITH HERE!
 					}
 					strncpy(dn,cachefilebase,1024);
@@ -980,8 +1010,12 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						fwrite(headerend,(bufpointer-headerend),1,datafile);
 						while((bytes = recv(mysocket,mybuffer,65535,0))) { //re-use existing buffer
 							long int curbytes=0;
-							if(bytes==-1) {
-								brintf("Recv returned -1. FAIL?\n");
+							if(bytes==-1 && errno==EAGAIN) {
+								brintf("Recv reported EAGAIN\n");
+								continue;
+							}
+							if(bytes<=0) {
+								brintf("Recv returned 0 or -1. FAIL?: cause: %s\n",strerror(errno));
 								break;
 							}
 							fwrite(mybuffer,bytes,1,datafile);
@@ -1041,7 +1075,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						fclose(headerfile);
 						free(headerbuf);
 						close(mysocket);
-						return get_resource(path,headers,headerlength,isdirectory,preferredverb);	
+						char modpurpose[1024];
+						strlcpy(modpurpose,purpose,1024);
+						strlcat(modpurpose,"+directoryrefetch",1024);
+						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose);	
 					}
 					//otherwise (no slash at end of location path), we must be a plain, boring symlink or some such.
 					//yawn.
@@ -1072,7 +1109,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						brintf("I should be yanking directories %s and %s\n",path+1,headerdirname);
 						close(mysocket);
 						free(headerbuf);
-						return get_resource(path,headers,headerlength,isdirectory,preferredverb);
+						char modpurpose[1024];
+						strlcpy(modpurpose,purpose,1024);
+						strlcat(modpurpose,"+plainrefetch",1024);
+						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose);
 					}
 					brintf("404 mode, I *may* be closing the cache header file...\n");
 					brintf(" Results: %d",fclose(headerfile)); //Need to release locks on 404's too!
@@ -1088,6 +1128,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				}
 			} 
 		}
+		brintf("Past while loop for receiving data - bytes is: %d, strerror says: %s\n",bytes,strerror(errno));
+		free(mybuffer);
 	} 
 	//if things went remotely well and internet-connectedly, you shouldn't end up here.
 	//if you did, something screwed up. Try to at least return a cachefile or something.
@@ -1143,24 +1185,9 @@ crest_getattr(const char *path, struct stat *stbuf)
 		} else {
 			FILE *cachefile=0;
 			int isdirectory=-1;
-/*			//zeroth: check dir STAT cache
-			dircachestat=finddircache(path);
-			if(dircachestat) {
-				if((dircachestat->st_mode & S_IFMT) == 0) {
-					//NAK stat
-					return -ENOENT;
-				} else {
-					memcpy(stbuf,dircachestat,sizeof(struct stat));
-					return 0;
-				}
-			} */
-			
-//			FILE *
-//			get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb);
-			
 			/**** ALL WORK IS DONE WITH get_resource! ****/
 			
-			cachefile=get_resource(path,header,HEADERLEN,&isdirectory,"HEAD");
+			cachefile=get_resource(path,header,HEADERLEN,&isdirectory,"HEAD","getattr");
 			
 			/*** THAT DID A LOT! ****/
 			
@@ -1249,7 +1276,7 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	FILE *cachefile;
 	int is_directory=-1;
 	
-	cachefile=get_resource(path,header,HEADERLEN,&is_directory,"HEAD");
+	cachefile=get_resource(path,header,HEADERLEN,&is_directory,"HEAD","readlink");
 	
 	if(is_directory) {
 		if(cachefile) {
@@ -1292,7 +1319,7 @@ crest_open(const char *path, struct fuse_file_info *fi)
 	if ((fi->flags & O_ACCMODE) != O_RDONLY) { /* Only reading allowed. */
 		return -EACCES;
 	}
-	rsrc=get_resource(path,headers,4096,&is_directory,"GET");
+	rsrc=get_resource(path,headers,4096,&is_directory,"GET","open");
 	if(is_directory) {
 		if(rsrc) {
 			fclose(rsrc);
@@ -1373,7 +1400,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	
 	memset(rm,0,sizeof(rm));
 	
-	dirfile=get_resource(path,0,0,&is_directory,"GET");
+	dirfile=get_resource(path,0,0,&is_directory,"GET","readdir");
 	if(!is_directory) {
 		if(dirfile) {
 			fclose(dirfile);
@@ -1672,7 +1699,7 @@ main(int argc, char **argv)
 	int isdirectory=-1;
 	void *stupid=crest_filesystem_operations.init; //just to keep from complaining
 	//FILE *get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb)
-	resource=get_resource(argv[1],headers,65535,&isdirectory,argv[2]);
+	resource=get_resource(argv[1],headers,65535,&isdirectory,argv[2],"testing");
 	printf("IS Directory?: %d\n",isdirectory);
 	if(resource) {
 		while(fread(&teenybuffer,1,1,resource)) {
