@@ -54,7 +54,8 @@ boottest: crestfs.static
 	mkdir -p /tmp/bootcache
 	cp -R /root/universix/infinix_primed_bootstrap/{desk.nu,.crestfs_metadata_rootnode} /tmp/bootcache
 	./crestfs.static /http /tmp/bootcache -s -d -f 1> /tmp/b1.out 2> /tmp/b2.out &
-	PATH="${PATH}:/root/universix/infinix_filesystem/sbin/" /root/universix/infinix_filesystem/sbin/update
+	PATH="${PATH}:/root/universix/infinix_filesystem/sbin/" /root/universix/update
+	umount /http
 	
 	
 
