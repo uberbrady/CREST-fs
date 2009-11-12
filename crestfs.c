@@ -137,7 +137,7 @@ find_keep(char *hostname)
 	for(i=0;i<curkeep;i++) {
 		if(keepalives[i].host && strcasecmp(hostname,keepalives[i].host)==0) {
 			int newfd=-1;
-			brintf("Found a valid keepalive at index: %d\n",i);
+			//brintf("Found a valid keepalive at index: %d\n",i);
 			//fcntl(poo)
 			newfd=dup(keepalives[i].fd);
 			if(newfd==-1) {
@@ -262,11 +262,11 @@ http_request(char *fspath,char *verb,char *etag, char *referer)
 			return 0;
 		}
 
-		brintf("Okay, connectication has occurenced: %ld\n",time(0)-start);
+		brintf("Okay, connectication has occurenced connect-AFTER: %ld\n",time(0)-start);
 		insert_keep(hostpart,sockfd);
 		freeaddrinfo(servinfo); // all done with this structure
 	} else {
-		brintf("Using kept-alive connection...%d\n",sockfd);
+		brintf("Using kept-alive connection...%d keep-AFTER: %ld\n",sockfd,time(0)-start);
 		keptalive=1;
 	}
 
@@ -280,20 +280,20 @@ http_request(char *fspath,char *verb,char *etag, char *referer)
 	} else {
 		etagheader[0]='\0';
 	}
-	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/0.4\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,etagheader);
+	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/0.7\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,etagheader);
 	//brintf("REQUEST: %s\n",reqstr);
 	int sendresults=send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
 	brintf("from start to SEND-AFTER delay was: %ld\n",time(0)-start);
 	
-	brintf("Sendresults on socket are: %d, keptalive is: %d\n",sendresults,keptalive);
+	//brintf("Sendresults on socket are: %d, keptalive is: %d\n",sendresults,keptalive);
 	char peekbuf[8];
 	int peekresults=0;
 	do {
 		peekresults=recv(sockfd, peekbuf, sizeof(peekbuf), MSG_PEEK);
 	} while (peekresults==-1 && errno== EAGAIN );
 	if(peekresults>0) {
-		brintf("Buffer peek says: %c%c%c%c\n",peekbuf[0],peekbuf[1],peekbuf[2],peekbuf[3]);
+		//brintf("Buffer peek says: %c%c%c%c\n",peekbuf[0],peekbuf[1],peekbuf[2],peekbuf[3]);
 	} else {
 		brintf("peek failed :(\n");
 	}
@@ -686,10 +686,10 @@ impossible_file(const char *origpath)
 					}
 					
 				} else {
-					brintf("Can't open directory contents file.\n");
+					//brintf("Can't open directory contents file.\n");
 				}
 			} else {
-				brintf("Metadata file is too stale to be sure\n");
+				//brintf("Metadata file is too stale to be sure\n");
 			}
 		} else {
 			//brintf("Could not open metadata file %s\n",metafoldbuf+1);
@@ -697,7 +697,7 @@ impossible_file(const char *origpath)
 
 		slashloc+=1;//iterate past the slash we're on
 	}
-	brintf("File '%s' appears not to be impossible, move along...\n",origpath);
+	//brintf("File '%s' appears not to be impossible, move along...\n",origpath);
 	free(dirbuffer);
 	regfree(&re);
 	return 0; //must not be impossible, or we would've returned previously
@@ -778,7 +778,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	if(lstat(path+1,&cachestat)==0) { //note we don't use stat() time for anything!!! we're just checking for directory mode
 		//cache file/directory/link/whatever *does* exist, if it's a directory, push to 'directory mode'
 		//that's all we do with this 'stat' value - the bulk of the logic is based on *header* data, not data-data.
-		brintf("Cache entity seems to exist?\n");
+		//brintf("Cache entity seems to exist?\n");
 		if(S_ISDIR(cachestat.st_mode)) {
 			brintf("ENGAGING DIRECTORY MODE - because the cache entity *IS* a directory!\n");
 			// resource we'll need to HEAD or GET will need '/' appended to it
@@ -817,11 +817,41 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
 		fread(headerbuf,1,65535,headerfile);
 		//brintf("Headers from cache are: %s, statresults is: %d\n",headerbuf,s);
+		if(!dontuseetags) {
+			//only time we DONT want to use etags is if the original cache entity (the data file)
+			//didn't exist at all. an etags request would wipe out additional header info that could be useful
+			//e.g. content-length. Wiping out that info is totally fine if you have the actual data - you can just
+			//seek to the end of it to see how big it is. But if you only HEAD'ed the file in the past, it sucks.
+			fetchheader(headerbuf,"etag",etag,256);
+		}
+
+		if(strlen(etag)>0 && strcmp(selectedverb,"HEAD")==0) {
+			//we asked to HEAD this file, but we have an etag on file. We'll upgrade to a GET.
+			strncpy(selectedverb,"GET",80);
+		}
+
 		if(time(0) - statbuf.st_mtime <= MAXCACHEAGE && statbuf.st_size > 8) {
 			//our cachefile is recent enough and big enough
 			FILE *tmp=0;
 			/* If your status isn't 200 or 304, OR it actually is, but you can succesfully open your cachefile, 
 					then you may return succesfully. Or if it's a HEAD reequest (where you don't care about such things)
+			*/
+			/* okay, there's a bug here and I don't know what to do about ti:
+				if you fetch a file, and your cache is old, you will call out a new If-none-match request, and update your 
+				metadata cache. Great. If you then ls -al the file BEFORE the cache has expired, it will show up as having
+				0 bytes. Why? Because your second request went through this short-circuit routine. This if-clause saw
+				that your selected verb was 'HEAD' (you're asking for getattr when you ls -al a file), so it never bothers
+				to open a file. When getattr gets its data back, first thing it tries is to look at the headers for a 
+				content-length. There ain't one, because the last fetch you did just returned a 304. So next it tries to run
+				to the end (using fseek/ftell) of the data-file pointer. Which is zero. Then it just gives up.
+				
+				one fix is to make crest_getattr always GET instead of HEAD - then it would have data to rely on.
+				
+				But then that means if you do an ls -al in a big directory, you'll be GET'ing all those files, even
+				though you don't want them.
+				
+				I think the 'real' solution is to do the etags-fetching business (below) up here somewhere instead, so we've
+				already 'upgraded' the selectedverb to GET. Yeah, that sounds good?
 			*/
 			if(strcmp(selectedverb,"HEAD")==0 || 
 					(fetchstatus(headerbuf)!=200 && fetchstatus(headerbuf)!=304) || (tmp=fopen(cachefilebase,"r"))) {
@@ -862,25 +892,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	//either there is no cachefile for the headers, or it's too old.
 	//the weird thing is, we have to be prepared to return our (possibly-outdated) cache, if we can't get on the internet
 	
-	//check parent directory for recentness, and if it is, and this file isn't in it, return as if 404? 
-	//   (shortcuts lots of HEAD's for nonexistent resources)
-	
-	if(!dontuseetags) {
-		//only time we DONT want to use etags is if the original cache entity (the data file)
-		//didn't exist at all. an etags request would wipe out additional header info that could be useful
-		//e.g. content-length. Wiping out that info is totally fine if you have the actual data - you can just
-		//seek to the end of it to see how big it is. But if you only HEAD'ed the file in the past, it sucks.
-		fetchheader(headerbuf,"etag",etag,256);
-	}
-	
-	if(strlen(etag)>0 && strcmp(selectedverb,"HEAD")==0) {
-		//we asked to HEAD this file, but we have an etag on file. We'll upgrade to a GET.
-		strncpy(selectedverb,"GET",80);
-	}
-	
 	mysocket=http_request(webresource,selectedverb,etag,purpose);
 	
-	brintf("Http request returned socket: %d\n",mysocket);
+	//brintf("Http request returned socket: %d\n",mysocket);
 	
 	if(mysocket > 0) {
 		char *mybuffer=calloc(65535,1);
@@ -894,7 +908,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		//also, if this turned out to be a HEAD, we can't write to the data-cachefile
 		while ((bytes = recv(mysocket,bufpointer,65535-(bufpointer-mybuffer),0)) && bufpointer-mybuffer < 65535) {
 			char *headerend=0;
-			brintf("RECV'ed: %d bytes, into %p\n",bytes,bufpointer);
+			//brintf("RECV'ed: %d bytes, into %p\n",bytes,bufpointer);
 			if(bytes==-1 && errno == EAGAIN) {
 				brintf("EAGAIN while receving, retrying\n");
 				continue; //force pulling from cache
@@ -921,7 +935,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				char connection[1024]="";
 				
 				//found the end of the headers!
-				brintf("FOund the end of the headers! this many bytes: %d\n",headerend-mybuffer);
+				//brintf("FOund the end of the headers! this many bytes: %d\n",headerend-mybuffer);
 				headerend+=4;
 
 				if(headerend-mybuffer>=65535) {
@@ -943,19 +957,11 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					delete_keep(host);
 				}
 
-				//brintf("And I think the headers ARE: %s",mybuffer);
-				/* fetchheader(mybuffer,"x-bespin-crest",crestheader,1024);
-				if(strlen(crestheader)==0) {
-					brintf("COULD NOT Find Crest-header - you have been STARBUCKSED. Going to cache!\n");
-					break;
-				} */
-				/* problems with the anti-starbucksing protocol - need to handle redirects and 404's
-					without at least the 404 handling, you can't negatively-cache nonexistent files.
-				*/
-				crestheader[0]='\0';
 				//special case for speed - on a 304, the headers probably haven't changed
 				//so don't rewrite them (fast fast!)
-				//
+				// We also want to skip the anti-starbucksing protocol (underneath)
+				// because it's too hard to override apache's conservative view of which headers are 'allowed'
+				// in a 304 response. expletive expletive.
 				if(fetchstatus(headerbuf)==304) {
 					brintf("FAST 304 Etags METHOD! Not touching much (just utimes)\n");
 					utime(headerfilename,0);
@@ -966,13 +972,23 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					return datafile;
 				}
 
-				brintf("We should be fputsing it to: %p\n",headerfile);
+				//brintf("And I think the headers ARE: %s",mybuffer);
+				fetchheader(mybuffer,"x-bespin-crest",crestheader,1024);
+				if(strlen(crestheader)==0) {
+					brintf("COULD NOT Find Crest-header - you have been STARBUCKSED. Going to cache!\n");
+					brintf("Busted headers are: %s\n",mybuffer);
+					break;
+				}
+				/* problems with the anti-starbucksing protocol - need to handle redirects and 404's
+					without at least the 404 handling, you can't negatively-cache nonexistent files.
+				*/
+				//brintf("We should be fputsing it to: %p\n",headerfile);
 				truncatestatus=ftruncate(fileno(headerfile),0); // we are OVERWRITING THE HEADERS - we got new headers, they're good, we wanna use 'em
 				rewind(headerfile); //I think I have to do this or it will re-fill with 0's?!
 				//brintf(" Craziness - the number of bytes we should be fputsing is: %d\n",strlen(mybuffer));
-				brintf("truncating did : %d",truncatestatus);
+				//brintf("truncating did : %d",truncatestatus);
 				if(truncatestatus) {
-					brintf(", cuzz: %s\n",strerror(errno));
+					brintf("truncating did : %d, cuzz: %s\n",truncatestatus,strerror(errno));
 				}
 				brintf("\n");			
 				fputs(headerbuf,headerfile);
@@ -983,9 +999,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				//freopen file pointer thingee to be read-only, and then
 				//return the file buffer
 				//write the remnants of the recv'ed header...
-				brintf("HTTP Header is: %d\n",fetchstatus(headerbuf));
+				//brintf("HTTP Header is: %d\n",fetchstatus(headerbuf));
 				fetchheader(headerbuf,"content-length",contentlength,1024);
-				brintf("Content length is: %s\n",contentlength);
+				//brintf("Content length is: %s\n",contentlength);
 				readlen=atoi(contentlength);
 				
 				switch(fetchstatus(mybuffer)) {
@@ -1007,16 +1023,16 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					strncat(tempfile,"/.tmpfile.XXXXXX",1024);
 					redirmake(tempfile); //make sure intervening directories exist, since we can't use fopenr()
 					tmpfd=mkstemp(tempfile); //dumbass, this creates the file.
-					brintf("tempfile will be: %s, it's in dirname: %s\n",tempfile,dn);
+					//brintf("tempfile will be: %s, it's in dirname: %s\n",tempfile,dn);
 					datafile=fdopen(tmpfd,"w+");
 					if(!datafile) {
 						brintf("Cannot open datafile for some reason?: %s",strerror(errno));
 					}
-					brintf("These are how many bytes are in the Remnant: %d out of %d read\n",bufpointer-headerend,bytes);
-					brintf("Here's the data you should be writing: %hhd %hhd %hhd\n",headerend[0],headerend[1],headerend[2]);
-					brintf("Datafile is: %p\n",datafile);
+					//brintf("These are how many bytes are in the Remnant: %d out of %d read\n",bufpointer-headerend,bytes);
+					//brintf("Here's the data you should be writing: %hhd %hhd %hhd\n",headerend[0],headerend[1],headerend[2]);
+					//brintf("Datafile is: %p\n",datafile);
 					if(bufpointer-headerend>=readlen) {
-						brintf("Remnant write is enough to satisfy request, not going into While loop.\n");
+						//brintf("Remnant write is enough to satisfy request, not going into While loop.\n");
 						fwrite(headerend,readlen,1,datafile);
 					} else {
 						fwrite(headerend,(bufpointer-headerend),1,datafile);
@@ -1038,9 +1054,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 							}
 							fwrite(mybuffer,bytes,1,datafile);
 							curbytes+=bytes;
-							brintf("Read %d bytes, expecting total of %d(%s), curerently at: %ld\n",bytes,readlen,contentlength,curbytes);
+							//brintf("Read %d bytes, expecting total of %d(%s), curerently at: %ld\n",bytes,readlen,contentlength,curbytes);
 							if(curbytes>=readlen) {
-								brintf("Okay, read enough data, bailing out of recv loop. Read: %ld, expecting: %d\n",ftell(datafile),readlen);
+								//brintf("Okay, read enough data, bailing out of recv loop. Read: %ld, expecting: %d\n",ftell(datafile),readlen);
 								break;
 							}
 							if(readlen-curbytes>65535) {
@@ -1337,7 +1353,7 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 		}
 		linkbuf[linklen+1]='\0';
 		if(stres==0 && strncmp(linkbuf,buf,1024)==0) {
-			brintf("Perfect match on symlink! Not doing anything\n");
+			//brintf("Perfect match on symlink! Not doing anything\n");
 			return 0;
 		}
 	}
@@ -1401,7 +1417,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	FILE *dirfile=0;
 	int is_directory=-1;
 	if(fi) {
-		brintf("Well, dunno why this is, but we have file info: %p, filehandle: %d\n",fi,(int)fi->fh);
+		//brintf("Well, dunno why this is, but we have file info: %p, filehandle: %d\n",fi,(int)fi->fh);
 	}
 
 	//should do a directory listing in the domains directory (the first one)
@@ -1446,6 +1462,11 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		}
 		free(dirbuffer);
 		return -ENOTDIR;
+	}
+	if(dirfile==0) {
+		//got no directory listing file, this directory doesn't even exist.
+		free(dirbuffer);
+		return -ENOENT;
 	}
 
 	fread(dirbuffer,1,DIRBUFFER,dirfile);
@@ -1534,9 +1555,9 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 int	cachedir = 0;
 
 static void *
-crest_init(struct fuse_conn_info *conn)
+crest_init(struct fuse_conn_info *conn __attribute__((unused)) )
 {
-	brintf("I'm not intending to do anything with this connection: %p\n",conn);
+	//brintf("I'm not intending to do anything with this connection: %p\n",conn);
 	fchdir(cachedir);
 	close(cachedir);
 	return 0;
