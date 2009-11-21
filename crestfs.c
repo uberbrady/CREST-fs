@@ -28,13 +28,9 @@
 #include <strings.h>
 
 
-/*************************/
-// Important #define's which describe all behavior as a whole
-//#define MAXCACHEAGE		3600*2
-#define MAXCACHEAGE		60
-
-//global variable (another one is down there but it's use is jsut there.
+//global variables (another one is down there but it's use is jsut there.
 char rootdir[1024]="";
+int maxcacheage=-1;
 
 
 //we may want this to be configurable in future - a command line option perhaps
@@ -205,8 +201,8 @@ delete_keep(char *hostname)
 int
 http_request(char *fspath,char *verb,char *etag, char *referer)
 {
-	char hostpart[1024];
-	char pathpart[1024];
+	char hostpart[1024]="";
+	char pathpart[1024]="";
 	pathparse(fspath,hostpart,pathpart,1024,1024);
 	int sockfd=-1;
 	char *reqstr=0;
@@ -266,7 +262,7 @@ http_request(char *fspath,char *verb,char *etag, char *referer)
 		insert_keep(hostpart,sockfd);
 		freeaddrinfo(servinfo); // all done with this structure
 	} else {
-		brintf("Using kept-alive connection...%d keep-AFTER: %ld\n",sockfd,time(0)-start);
+		brintf("Using kept-alive connection... keep-AFTER: %ld\n",time(0)-start);
 		keptalive=1;
 	}
 
@@ -622,7 +618,7 @@ impossible_file(const char *origpath)
 			fread(headerbuf,1,65535,metaptr);
 			fclose(metaptr);
 			//brintf("Buffer we are checking out is: %s",headerbuf);
-			if(time(0) - statbuf.st_mtime <= MAXCACHEAGE && statbuf.st_size > 8) {
+			if(time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) {
 				//okay, the metadata is fresh...
 				//brintf("Metadata is fresh enough!\n");
 				if((dataptr=fopen(dirnamebuf+1,"r"))) {
@@ -830,7 +826,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			strncpy(selectedverb,"GET",80);
 		}
 
-		if(time(0) - statbuf.st_mtime <= MAXCACHEAGE && statbuf.st_size > 8) {
+		if(time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) {
 			//our cachefile is recent enough and big enough
 			FILE *tmp=0;
 			/* If your status isn't 200 or 304, OR it actually is, but you can succesfully open your cachefile, 
@@ -855,8 +851,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			*/
 			if(strcmp(selectedverb,"HEAD")==0 || 
 					(fetchstatus(headerbuf)!=200 && fetchstatus(headerbuf)!=304) || (tmp=fopen(cachefilebase,"r"))) {
-				printf("RECENT ENOUGH CACHE! SHORT_CIRCUIT! time: %ld, st_mtime: %ld, MAXCACHEAGE: %d, fileage: %ld, verb: %s, status: %d, ptr: %p\n",
-					time(0),statbuf.st_mtime,MAXCACHEAGE,time(0)-statbuf.st_mtime,selectedverb,fetchstatus(headerbuf),tmp);
+				printf("RECENT ENOUGH CACHE! SHORT_CIRCUIT! time: %ld, st_mtime: %ld, maxcacheage: %d, fileage: %ld, verb: %s, status: %d, ptr: %p\n",
+					time(0),statbuf.st_mtime,maxcacheage,time(0)-statbuf.st_mtime,selectedverb,fetchstatus(headerbuf),tmp);
 				if(headers && headerlength>0) {
 					strncpy(headers,headerbuf,headerlength);
 				}
@@ -868,8 +864,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				dontuseetags=1;
 			}
 		} else {
-			brintf("Cache file is too old (or too small); continuing with normal behavior. cachefilename: %s Age: %ld MAXCACHEAGE: %d, filesize: %d\n",
-				headerfilename,(int)time(0)-statbuf.st_mtime,MAXCACHEAGE,(int)statbuf.st_size);
+			brintf("Cache file is too old (or too small); continuing with normal behavior. cachefilename: %s Age: %ld maxcacheage: %d, filesize: %d\n",
+				headerfilename,(int)time(0)-statbuf.st_mtime,maxcacheage,(int)statbuf.st_size);
 		}
 	} else {
 		//no cachefile exists, we ahve to create one while watching out for races.
@@ -969,6 +965,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					fclose(headerfile); // RELEASE LOCK
 					free(headerbuf);
 					close(mysocket);
+					free(mybuffer);
 					return datafile;
 				}
 
@@ -1078,6 +1075,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					fclose(headerfile); //RELEASE LOCK
 					free(headerbuf);
 					close(mysocket);
+					free(mybuffer);
 					return datafile;
 					break;
 					
@@ -1091,6 +1089,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					fclose(headerfile); // RELEASE LOCK
 					free(headerbuf);
 					close(mysocket);
+					free(mybuffer);
 					return datafile;
 					break;
 					
@@ -1119,6 +1118,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						char modpurpose[1024];
 						strlcpy(modpurpose,purpose,1024);
 						strlcat(modpurpose,"+directoryrefetch",1024);
+						free(mybuffer);
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose);	
 					}
 					//otherwise (no slash at end of location path), we must be a plain, boring symlink or some such.
@@ -1127,6 +1127,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					fclose(headerfile); //release lock
 					free(headerbuf);
 					close(mysocket);
+					free(mybuffer);
 					return 0; //do we return a filepointer to an empty file or 0? NOT SURE!
 					break;
 					
@@ -1153,12 +1154,14 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						char modpurpose[1024];
 						strlcpy(modpurpose,purpose,1024);
 						strlcat(modpurpose,"+plainrefetch",1024);
+						free(mybuffer);
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose);
 					}
 					brintf("404 mode, I *may* be closing the cache header file...\n");
 					brintf(" Results: %d",fclose(headerfile)); //Need to release locks on 404's too!
 					close(mysocket);
 					free(headerbuf);
+					free(mybuffer);
 					return 0; //nonexistent file, return 0, hold on to cache, no datafile exists.
 					break;
 					
@@ -1345,7 +1348,7 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	struct stat st;
 	int stres=lstat(path+1,&st);
 	if(stres==0 && S_ISLNK(st.st_mode)) {
-		char linkbuf[1024];
+		char linkbuf[1024]="";
 		int linklen=readlink(path+1,linkbuf,1024);
 		if(linklen>1023) {
 			brintf("Too long of a link :(\n");
@@ -1702,9 +1705,9 @@ main(int argc, char **argv)
 	
 	// single user, read-only. NB!
 	
-	if(argc<3) {
+	if(argc<4) {
 		brintf("Not right number of args, you gave me %d\n",argc);
-		brintf("Usage: %s mountdir cachedir [options]\n",argv[0]);
+		brintf("Usage: %s mountdir cachedir maxcacheage [options]\n",argv[0]);
 		exit(1);
 	}
 	//brintf("Decent. Arg count: %d\n",argc);
@@ -1717,11 +1720,17 @@ main(int argc, char **argv)
 		strlcat(rootdir,"/",1024);
 	}
 	strlcat(rootdir,argv[1],1024); //first parameter, is mountpoint
-	cachedir= open(argv[2], O_RDONLY);
+	cachedir= open(argv[2], O_RDONLY); //second parameter is cachedir
 	if(cachedir==-1) {
 		brintf("%d no open cachedir\n",cachedir);
+		exit(2);
 	}
-	for(i=3;i<argc;i++) {
+	maxcacheage=atoi(argv[3]);
+	if(maxcacheage<=0) {
+		brintf("%d is not a valid max cache age\n",maxcacheage);
+		exit(3);
+	}
+	for(i=4;i<argc;i++) {
 		addparam(&myargc,&myargs,argv[i]);
 	}
 	addparam(&myargc,&myargs,"-r");

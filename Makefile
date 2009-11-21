@@ -25,7 +25,7 @@ crestfs.memtest.o: Makefile crestfs.c
 	
 memtest: crestfs.memtest
 	export MALLOC_TRACE=/tmp/memlog
-	 ./crestfs.memtest /tmp/doodle /tmp/cachetest -s -d -f
+	 ./crestfs.memtest /tmp/doodle /tmp/cachetest 60 -s -d -f
 
 
 	
@@ -49,12 +49,13 @@ crestfs.o: crestfs.c Makefile
 	
 
 
-boottest: crestfs.static
+boottest: crestfs.static crestfs.dynamic
 	rm -rf /tmp/bootcache
 	mkdir -p /tmp/bootcache
-	cp -R /root/universix/infinix_primed_bootstrap/{desk.nu,.crestfs_metadata_rootnode} /tmp/bootcache
-	./crestfs.static /http /tmp/bootcache -s -d -f 1> /tmp/b1.out 2> /tmp/b2.out &
-	PATH="${PATH}:/root/universix/infinix_filesystem/sbin/" /root/universix/update
+	cp -Rp /root/universix/infinix_primed_bootstrap/{desk.nu,.crestfs_metadata_rootnode} /tmp/bootcache
+	valgrind --leak-check=full --log-file=/tmp/valout.txt ./crestfs.dynamic /http /tmp/bootcache 60 -s -d -f 1> /tmp/b1.out 2> /tmp/b2.out &
+	#PATH="${PATH}:/root/universix/infinix_filesystem/sbin/" /root/universix/update
+	cd /root/universix/infinix_primed_bootstrap && find . -type f -and \! -name .crestfs_metadata_rootnode -and \! -name .crestfs_directory_cachenode -exec ls -al /http/'{}' \;
 	umount /http
 	
 	
@@ -66,11 +67,11 @@ test: crestfs.static
 	#umount /tmp/doodle
 	mkdir -p /tmp/doodle
 	mkdir -p /tmp/cachetest
-	strace -o /tmp/straceo ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f 1> /tmp/1.out 2> /tmp/2.out
+	strace -o /tmp/straceo ./crestfs.static /tmp/doodle /tmp/cachetest 60 -s -d -f 1> /tmp/1.out 2> /tmp/2.out
 	#ulimit ?
 
 debug: crestfs.static
-	gdb --args ./crestfs.static /tmp/doodle /tmp/cachetest -s -d -f 
+	gdb --args ./crestfs.static /tmp/doodle /tmp/cachetest 60 -s -d -f 
 
 testdriven: crestfs.testframework
 	cd /tmp/crestotesto && ~/universix/CREST-fs/crestfs.testframework /desk.nu/testdir HEAD
@@ -80,3 +81,4 @@ testdriven: crestfs.testframework
 crestfs.testframework: crestfs.c Makefile
 	$(gcc) -g -Wall -Werror -idirafter /usr/include/fuse -c -DTESTFRAMEWORK -o crestfs.testframework.o crestfs.c
 	$(gcc) -static -g -Wall -Werror -o crestfs.testframework crestfs.testframework.o libfuse.a -lpthread -ldl
+ 

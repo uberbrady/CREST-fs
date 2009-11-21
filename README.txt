@@ -32,14 +32,15 @@ How do I use it?
 Hey, I don't want The Whole Web, I just want *my* server. (server.com/sampledir/myfile1...)
 	You'll still have to mount the web as a whole, but you can make a symlink -
 	
-	./crestfs mymountpoint /tmp/cachedir # to mount the web normally
+	./crestfs mymountpoint /tmp/cachedir 60 # to mount the web normally, using a cachetime of 60
 	
 	ln -s mymountpoint/server.com/sampledir/ justmyserver # to have a 'justmyserver' "directory" which points to your server's directory
 	
 What features does it have?
+	(NEW) Cache-time is mount-time configurable with a command-line option - the amount of time that a resource will *always* be considered 'fresh' for, without requesting the resource from the web again. Interesting values for this are 60 as a reasonable default, and 2^31-1 (2147483647) as a near 'infinite' value (which means resources will only be grabbed once, then never requested again. Well, not for 1600 years, at least.).
 	(NEW) User-Agent header is now "CREST-fs/0.7", a big bump in version since some significant changes affect how the system works now.
 	(NEW) Anti-HotSpot pollution - since you're treating REST resources from the Web as actual files, when you go into a Starbucks and use their Wifi, every page you ask for gives you a redirect to a login page. Those redirects would normally be parsed as symlinks and could completely destroy your filesystem. Now, all filesystem-level 200's, 404's and 30x-series redirects require a special header to be set - "X-Bespin-Crest:" - it can be set to anything for now (the production server uses the word 'yes'), but will eventually be some kind of digital signature. This unfortunately makes using a stock Apache install far more difficult than it should be.
-	(NEW) HTTP/1.1 pipelining support is built and has improved performance dramatically, especially since everything usually runs single-threaded anyways (-s).
+	HTTP/1.1 pipelining support is built and has improved performance dramatically, especially since everything usually runs single-threaded anyways (-s).
 	
 	etags on directory listings will be respected (so later directory listings don't require another full GET)
 
@@ -74,6 +75,5 @@ BUGS
 	Directory listings can't be larger than 1MB
 	Some of the static buffers are probably too small for practical use
 	The Makefile is horrible and needs to probably be set up with 'autoconf' or something like it
-	The max-cache age(age at which you want to check with the server) should be runtime or mount-time configurable
 	Magic numbers are used more than they should be, and this is Naughty.
 	Symlinks to directories probably don't work.
