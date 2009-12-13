@@ -29,13 +29,17 @@ memtest: crestfs.memtest
 
 
 	
-crestfs.static: Makefile crestfs.static.o
-	$(gcc) $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o libfuse.a -lpthread -ldl
+crestfs.static: Makefile crestfs.static.o resource.static.o common.static.o
+	$(gcc) $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o resource.static.o common.static.o libfuse.a -lpthread -ldl
 
 crestfs.static.o: crestfs.c Makefile
 	$(gcc)  -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o crestfs.static.o crestfs.c
 
-
+resource.static.o: resource.c resource.h Makefile
+	$(gcc) -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o resource.static.o resource.c
+	
+common.static.o: common.c common.h
+	$(gcc) -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLASG) -o common.static.o common.c
 
 
 crestfs.dynamic: crestfs.o Makefile
@@ -47,6 +51,8 @@ crestfs.o: crestfs.c Makefile
 	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	gcc $(CFLAGS) -Wall -Werror -c -o crestfs.o crestfs.c
 	
+resource.o: resource.h resource.h Makefile
+	gcc $(CFLAGS) -Wall -Werror -c -o resource.o resource.c
 
 
 boottest: crestfs.static crestfs.dynamic
