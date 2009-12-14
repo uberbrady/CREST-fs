@@ -116,8 +116,10 @@ crest_getattr(const char *path, struct stat *stbuf)
 		char hostname[80];
 		char pathpart[1024];
 		pathparse(path,hostname,pathpart,80,1024);
+		brintf("getattr: path parses to hsotname: %s and path: '%s'\n",hostname,pathpart);
 		
 		if(strcmp(pathpart,"/")==0 || strcmp(path,"/")==0) {
+			brintf("ROOT OF A HOST - *MUST* be a directory!\n");
 			//root of a host, MUST be a directory no matter what.
 			stbuf->st_mode = S_IFDIR | 0755; //I am a a directory!
 			stbuf->st_nlink = 1; //use '1' to allow find(1) to decend within...

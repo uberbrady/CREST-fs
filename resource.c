@@ -485,30 +485,34 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	//FIXME - better than this would be to see inthe directory listing somewher eif this entry exist
 	//and has a / after it - if so, hint it to being a directory!!!!!!!!
 	//that will improve 'raw' ls -lR performance
-	if(lstat(path+1,&cachestat)==0) { //note we don't use stat() time for anything!!! we're just checking for directory mode
+	char host[1024];
+	char pathpart[1024];
+	pathparse(path,host,pathpart,1024,1024);
+	brintf("Dir test: Host: %s, pathpart: '%s'\n",host,pathpart);
+	if((lstat(path+1,&cachestat)==0 && S_ISDIR(cachestat.st_mode)) || strcmp(pathpart,"/")==0) { 
+		//note we don't use stat() time for anything!!! we're just checking for directory mode.
 		//cache file/directory/link/whatever *does* exist, if it's a directory, push to 'directory mode'
 		//that's all we do with this 'stat' value - the bulk of the logic is based on *header* data, not data-data.
-		//brintf("Cache entity seems to exist?\n");
-		if(S_ISDIR(cachestat.st_mode)) {
-			brintf("ENGAGING DIRECTORY MODE - because the cache entity *IS* a directory!\n");
-			// resource we'll need to HEAD or GET will need '/' appended to it
-			// cachefile with stuff in it we'll care about will be (path+1)+"/.crestfs_directory_cachenode"
-			// with HTTP headers in .crestfs_metadata_rootnode/(path+1)+"/.crestfs_directory_cachenode"
-			
-			//and FURTHERMORE - the type we're assuming this resource is may no longer be true - 
-			//a file could've converted into a directory or some such!
-			strncat(cachefilebase,DIRCACHEFILE,1024); //need to append the "/.crestfs_directory_cachenode"	
-			strncat(webresource,"/",1024);
-			strncat(headerfilename,DIRCACHEFILE,1024); //append same to metadata filename?
-			if(isdirectory) {
-				*isdirectory=1;
-			}
-			dirmode=1; //regardless of *isdirectory, I need to know this if we 404 later.
-			// I MIGHT LIKE TO DO THE 'MODE-escalation' and etags stuff here? But I haven't *READ* the headers yet...
-			//don't matter. Whether or not I got etags, I want this directory's contents
-			if(strcmp(preferredverb,"HEAD")==0) {
-				strcpy(selectedverb,"GET");
-			}
+		//NB - if the path part of the 'path' is exactly "/", then we *KNOW* this is a directory (the root one for that host.)
+		//brintf("Cache entity seems to exist? (or we're the root of some host)\n");
+		brintf("ENGAGING DIRECTORY MODE - because the cache entity *IS* a directory!\n");
+		// resource we'll need to HEAD or GET will need '/' appended to it
+		// cachefile with stuff in it we'll care about will be (path+1)+"/.crestfs_directory_cachenode"
+		// with HTTP headers in .crestfs_metadata_rootnode/(path+1)+"/.crestfs_directory_cachenode"
+		
+		//and FURTHERMORE - the type we're assuming this resource is may no longer be true - 
+		//a file could've converted into a directory or some such!
+		strncat(cachefilebase,DIRCACHEFILE,1024); //need to append the "/.crestfs_directory_cachenode"	
+		strncat(webresource,"/",1024);
+		strncat(headerfilename,DIRCACHEFILE,1024); //append same to metadata filename?
+		if(isdirectory) {
+			*isdirectory=1;
+		}
+		dirmode=1; //regardless of *isdirectory, I need to know this if we 404 later.
+		// I MIGHT LIKE TO DO THE 'MODE-escalation' and etags stuff here? But I haven't *READ* the headers yet...
+		//don't matter. Whether or not I got etags, I want this directory's contents
+		if(strcmp(preferredverb,"HEAD")==0) {
+			strcpy(selectedverb,"GET");
 		}
 	} else {
 		//entity does not exist, so we do NOT want to start using etags for things!

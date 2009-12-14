@@ -71,7 +71,6 @@ What features does it have?
 BUGS
 	The Anti-HotSpot Pollution system requires a lot of poking around at Apache to get working.
 	Unexpected conditions in the cache directories will crash the filesystem.
-	Trying to get a root-level listing of a host - e.g. http://www.blah.com - doesn't seem to trigger a directory fetch properly and corrupts the cache for that would-be directory.
 	If you don't run crestfs in debug mode (-d) - it will hang for some bizarre reason.
 	Directory listings can't be larger than 1MB
 	Some of the static buffers are probably too small for practical use
