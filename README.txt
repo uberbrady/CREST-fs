@@ -9,7 +9,7 @@ What does this require?
 
 Do I need a webdav server to use this crest thing?
 
-	No. The only special thing you'll need is some additional headers (Which need to appear on all HTTP 200 responses, as well as redirects, and 404's, but not on 304's). Any webserver that does directory listings/index pages in a particular way should work. That particular way is: it should list relative links, and the href="" attribute should match the name for the link. Those 'entries' are considered 'rest resources' that can be listed. E.g.:
+	No. Well...no. The server protocol is really just HTTP, except for a special set of headers that are always set on every response. I deliberately did not use WebDAV. I think the only special thing you'll need is some additional headers (Which need to appear on all HTTP 200 responses, as well as redirects, and 404's, but not on 304's). Any webserver that does directory listings/index pages in a particular way should work. That particular way is: it should list relative links, and the href="" attribute should match the name for the link. Those 'entries' are considered 'rest resources' that can be listed. E.g.:
 	<a href='resource1'>resource1</a> ...
 	<a href='res2'>res2</a> ...
 	
@@ -17,31 +17,34 @@ Do I need a webdav server to use this crest thing?
 	
 	Other links on the page that are *not* relative, or whose names don't match their href's will *not* be listed. The default directory listing module in Apache displays links in this fashion.
 	
-	You *really* should have etags enabled on your server, or you will get horrible caching performance. Having it on directories will be nice as well, but requires some custom dirindex scripts.
+	You *really* should have etags enabled on your server, or you will get horrible caching performance. Having it on directories will be nice as well, but requires some custom dirindex scripts. I have ended up building an entire PHP application to handle the various custom server responses. It's not huge, but it's a few pages of code.
 
 How do I use it?
 	
-	./crestfs whereyouwanttomountit whereyouwanttocacheit
+	./crestfs whereyouwanttomountit whereyouwanttocacheit 60 /dev/null
 	then, you can cd to whereyouwanttomountit/example.com/mysubdir
 	A feature that's now in heavy use will actually attempt to cache the contents 'underneath' the mountpoint by specifying the same directory twice.
 	
 	I usually run it with options of:
 	  -d
-	and redirect stdout and stderr to files for debugging. It used to require -s and -f (to force single-threaded mode) but this is less often teh case now.
+	and redirect stdout and stderr to files for debugging. It used to require -s and -f (to force single-threaded mode) but this is less often the case now. 
+	
+If you want to use HTTP Basic Authentication for some site on the web (right now only one site can be used), create a file and reference it instead of /dev/null in the command-line. The file should a few lines: the domain-name (and optional path elements) for which you want to authenticate, the next line should be your username, and the final line should be your password. This file need not exist when crestfs is launched (attempts to access password-protected files will simply fail). If the file is filled with the appropriate information later, crestfs should learn about it. If the contents of the file are changed (not simply filled-in from empty), I'm not sure it'll be caught properly.
 	
 Hey, I don't want The Whole Web, I just want *my* server. (server.com/sampledir/myfile1...)
 	You'll still have to mount the web as a whole, but you can make a symlink -
 	
-	./crestfs mymountpoint /tmp/cachedir 60 # to mount the web normally, using a cachetime of 60
+	./crestfs mymountpoint /tmp/cachedir 60 /dev/null  # to mount the web normally, using a cachetime of 60
 	
 	ln -s mymountpoint/server.com/sampledir/ justmyserver # to have a 'justmyserver' "directory" which points to your server's directory
 	
 What features does it have?
+	(NEW) HTTP Basic authentication to a 'root' domain. This will eventually lead to read/write access to files.
 	(NEW) Threading support is in and seems to work OK.
 	(NEW) Cache-time is mount-time configurable with a command-line option - the amount of time that a resource will *always* be considered 'fresh' for, without requesting the resource from the web again. Interesting values for this are 60 as a reasonable default, and 2^31-1 (2147483647) as a near 'infinite' value (which means resources will only be grabbed once, then never requested again. Well, not for 1600 years, at least.).
 	(NEW) User-Agent header is now "CREST-fs/0.7", a big bump in version since some significant changes affect how the system works now.
-	(NEW) Anti-HotSpot pollution - since you're treating REST resources from the Web as actual files, when you go into a Starbucks and use their Wifi, every page you ask for gives you a redirect to a login page. Those redirects would normally be parsed as symlinks and could completely destroy your filesystem. Now, all filesystem-level 200's, 404's and 30x-series redirects require a special header to be set - "X-Bespin-Crest:" - it can be set to anything for now (the production server uses the word 'yes'), but will eventually be some kind of digital signature. This unfortunately makes using a stock Apache install far more difficult than it should be.
-	HTTP/1.1 pipelining support is built and has improved performance dramatically, especially since everything usually runs single-threaded anyways (-s).
+	Anti-HotSpot pollution - since you're treating REST resources from the Web as actual files, when you go into a Starbucks and use their Wifi, every page you ask for gives you a redirect to a login page. Those redirects would normally be parsed as symlinks and could completely destroy your filesystem. Now, all filesystem-level 200's, 404's and 30x-series redirects require a special header to be set - "X-Bespin-Crest:" - it can be set to anything for now (the production server uses the word 'yes'), but will eventually be some kind of digital signature. This unfortunately makes using a stock Apache install far more difficult than it should be.
+	HTTP/1.1 pipelining support is built and has improved performance dramatically.
 	
 	etags on directory listings will be respected (so later directory listings don't require another full GET)
 
