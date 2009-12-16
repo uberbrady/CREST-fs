@@ -9,6 +9,9 @@
 #include <time.h>
 #include <sys/time.h>
 
+#include "common.h"
+
+#include <crypt.h>
 
 //BSD-isms we have to replicate (puke, puke)
 
@@ -221,4 +224,136 @@ parsedate(char *datestring)
 	}
 }
 
+char _staticauthfile[1024]="";
+char _userpass[1024]="";
+//static buffer; which is fine, we don't want 15 different concepts of what authfile is happening
 
+char *
+rootauthurl()
+{
+	if(strcmp(_staticauthfile,"")!=0) {
+		//cache this, but we have no invalidation method yet. This is going to change though.
+		return _staticauthfile;
+	}
+	FILE *authfp=fopen(authfile,"r");
+	if(!authfp) {
+		return 0; //no authfile at all
+	}
+	fgets(_staticauthfile,1024,authfp);
+	if(strlen(_staticauthfile)>1) {
+		//just start by assuming there's a newline at the end of that.
+		_staticauthfile[strlen(_staticauthfile)-1]='\0';
+		fgets(_userpass,1024,authfp);
+		_userpass[strlen(_userpass)-1]='\0';
+		strlcat(_userpass,":",1024);
+		fgets(_userpass+strlen(_userpass),1024-strlen(_userpass),authfp);
+		if(_userpass[strlen(_userpass)-1]=='\n') {
+			_userpass[strlen(_userpass)-1]='\0';
+		}
+		fclose(authfp);
+	}
+	return _staticauthfile;
+}
+
+pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
+
+
+void 
+hashname(const char *filename,char hash[23])
+{
+	pthread_mutex_lock(&mut);
+	
+	char *ans=crypt(filename,"$1$");
+	strcpy(hash,ans+4);
+	pthread_mutex_unlock(&mut);
+	//strreplace(hash,"/","-");
+	char *iter=hash;
+	while((iter=strchr(iter,'/'))) { //gotta convert / to - for filenames
+		iter[0]='-';
+	}
+}
+
+char *
+wants_auth(const char *path)
+{
+	char * rau=rootauthurl();
+	if(path[0]=='/') {
+		path=path+1; //skip leading slashes methinks, FS-style path arrays tend to have them
+	}
+	if (strlen(rau)>0 && strncmp(rau,path,strlen(rau))==0) {
+		return _userpass;
+	} else {
+		return 0;
+	}
+}
+
+char *b64table="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+void
+fill_authorization(const char *path,char *authstring,int authlen)
+{
+	char *rawauthstring=wants_auth(path);
+	if(rawauthstring==0) {
+		authstring[0]='\0';
+		return;
+	}
+	strlcpy(authstring,"Authorization: Basic ",authlen);
+	//get the authstring from somewhere, then...
+	path=path;
+	int authlensofar=strlen(authstring);
+	unsigned int bits6;
+	for(bits6=0;bits6<strlen(rawauthstring)*8;bits6+=6) {
+		unsigned int byteindex=bits6/8;
+		int bitremainder=bits6 % 8;
+		char a=rawauthstring[byteindex];
+		char b=0;
+		if(strlen(rawauthstring)>byteindex) {
+			b=rawauthstring[byteindex+1];
+		}
+		unsigned short ab=((unsigned short)a)<<8 | b;
+		//brintf("a is: %d and b is: %d My short is: %d, bitremainder: %d\n",a,b,ab,bitremainder);
+		switch (bitremainder) {
+			case 0:
+			ab>>=10;
+			break;
+			
+			case 6:
+			ab>>=4;
+			break;
+			
+			case 4:
+			ab>>=6;
+			break;
+			
+			case 2:
+			ab>>=8;
+			break;
+		}
+		//brintf("Transformed, that's: %d, then masked it's %d\n",ab,(ab & 0x3F));
+		authstring[authlensofar]=b64table[ab & 0x3F];
+		authlensofar++;
+		if(authlensofar>authlen) {
+			//return? What
+			//need to \0 a string first?
+			exit(57); 
+		}
+		
+		//remainder 0 => rightshift 10
+		//remainder 6 => rightshift 4
+		//number will be 12, which is byteindex 1 now, and remainder
+		//remainder 4 => rightshift 6
+	}
+	authstring[authlensofar]='\0';
+	switch(strlen(rawauthstring) % 3) {
+		case 1:
+		strcat(authstring,"==");
+		break;
+		
+		case 2:
+		strcat(authstring,"=");
+		break;
+	}
+	if(strlen(authstring)>(unsigned)authlen) {
+		exit(57);
+	}
+}

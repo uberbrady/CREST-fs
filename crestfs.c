@@ -128,7 +128,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 			int isdirectory=-1;
 			/**** ALL WORK IS DONE WITH get_resource! ****/
 			
-			cachefile=get_resource(path,header,HEADERLEN,&isdirectory,"HEAD","getattr");
+			cachefile=get_resource(path,header,HEADERLEN,&isdirectory,"HEAD","getattr","r");
 			
 			/*** THAT DID A LOT! ****/
 			
@@ -194,6 +194,12 @@ crest_getattr(const char *path, struct stat *stbuf)
 					return -ENOENT;
 					break;
 					
+					case 401:
+					if(cachefile) {
+						fclose(cachefile);
+					}
+					return -EACCES;
+					break;
 				}
 				
 			}
@@ -217,7 +223,7 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	FILE *cachefile;
 	int is_directory=-1;
 	
-	cachefile=get_resource(path,header,HEADERLEN,&is_directory,"HEAD","readlink");
+	cachefile=get_resource(path,header,HEADERLEN,&is_directory,"HEAD","readlink","r");
 	
 	if(is_directory) {
 		if(cachefile) {
@@ -264,6 +270,8 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	return 0;
 }
 
+#include "common.h"
+
 static int
 crest_open(const char *path, struct fuse_file_info *fi)
 {
@@ -271,10 +279,14 @@ crest_open(const char *path, struct fuse_file_info *fi)
 	char headers[4096];
 	
 	int is_directory=-1;
-	if ((fi->flags & O_ACCMODE) != O_RDONLY) { /* Only reading allowed. */
-		return -EACCES;
+	int wantwrite=(fi->flags & O_ACCMODE) != O_RDONLY; //not read-only means write only or read-write.
+	if(!wants_auth(path)) {
+		//not under the root auth URL, so no writing allowed
+		if (wantwrite) { /* Only reading allowed. */
+			return -EACCES;
+		}
 	}
-	rsrc=get_resource(path,headers,4096,&is_directory,"GET","open");
+	rsrc=get_resource(path,headers,4096,&is_directory,"GET","open",(wantwrite? "r+": "r"));
 	if(is_directory) {
 		if(rsrc) {
 			fclose(rsrc);
@@ -355,7 +367,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 	
 	memset(rm,0,sizeof(rm));
 	
-	dirfile=get_resource(path,0,0,&is_directory,"GET","readdir");
+	dirfile=get_resource(path,0,0,&is_directory,"GET","readdir","r");
 	if(!is_directory) {
 		if(dirfile) {
 			fclose(dirfile);
@@ -471,6 +483,17 @@ static struct fuse_operations crest_filesystem_operations = {
     .release = crest_release, /* to hold on to a filehandle to the cache so that reads are consistent with one generation of the file */
     .read    = crest_read,    /* To provide file content.           */
     .readdir = crest_readdir, /* To provide directory listing.      */
+/*
+    .mkdir = PUT (fuck MKCOL. fuck DAV. PUT with a slash at the end. M'k?)
+    .unlink = (delete?)
+    .rmdir = (still delete?)
+    .symlink = (POST)
+    .rename = MOVE - not liking new verbs today. maybe not. maybe DELETE followed by PUT
+    .write = 
+    .statfs - would be nice but I don't know how that would work....
+    .flush??????????
+    .fsync?
+*/
 };
 
 /********************** Test routines **********************/
@@ -554,6 +577,17 @@ void pretest()
 	exit(0);
 }
 
+void authtest()
+{
+	char myauthstring[1024];
+	fill_authorization("Dontcare",myauthstring,1024);
+	
+	printf("Authorization string is: %s\n",myauthstring);
+	fill_authorization("my.lightdesktop.com/something/something",myauthstring,1024);
+	printf("THen it's: %s\n",myauthstring);
+	exit(0);
+}
+
 /********************** END TESTING **********************/
 
 void
@@ -588,9 +622,7 @@ addparam(int *argc,char ***argv,char *string)
 
 #ifndef TESTFRAMEWORK
 
-#if defined(MEMTEST)
-#include <mcheck.h>
-#endif
+char authfile[256];
 
 int
 main(int argc, char **argv)
@@ -606,9 +638,9 @@ main(int argc, char **argv)
 	
 	// single user, read-only. NB!
 	
-	if(argc<4) {
+	if(argc<5) {
 		brintf("Not right number of args, you gave me %d\n",argc);
-		brintf("Usage: %s mountdir cachedir maxcacheage [options]\n",argv[0]);
+		brintf("Usage: %s mountdir cachedir maxcacheage rootauthfile [options]\n",argv[0]);
 		exit(1);
 	}
 	//brintf("Decent. Arg count: %d\n",argc);
@@ -631,10 +663,13 @@ main(int argc, char **argv)
 		brintf("%d is not a valid max cache age\n",maxcacheage);
 		exit(3);
 	}
-	for(i=4;i<argc;i++) {
+	strlcpy(authfile,argv[4],256);
+	brintf("Authfile: %s\n",authfile);
+		
+	for(i=5;i<argc;i++) {
 		addparam(&myargc,&myargs,argv[i]);
 	}
-	addparam(&myargc,&myargs,"-r");
+	/////////addparam(&myargc,&myargs,"-r"); //no longer so nasty about read-only...areas indicated by teh authfile are NOT
 	// -s ? -f ? -d ? 
 	#ifdef __APPLE__
 	addparam(&myargc,&myargs,"-o");
@@ -642,12 +677,6 @@ main(int argc, char **argv)
 	#else
 	addparam(&myargc,&myargs,"-o");
 	addparam(&myargc,&myargs,"nonempty");
-	#endif
-	#if defined(MEMTEST)
-	mtrace();
-	//void *crapweasel=0;
-	//crapweasel=malloc(123);
-	printf("I JUST SET MTRACE!!!!!\n");
 	#endif
 	//#endif
 /* 	#ifdef __APPLE__

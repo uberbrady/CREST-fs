@@ -10,6 +10,8 @@ int asprintf(char **ret, const char *format, ...) __attribute__ ((format (printf
 
 extern int maxcacheage;
 
+extern char authfile[256];
+
 #define TOOMANYFILES 1000
 
 #include <regex.h>
@@ -21,3 +23,11 @@ void fetchheader(char *headers,char *name,char *results,int length);
 int fetchstatus(char *headers);
 
 int parsedate(char *datestring);
+
+char *wants_auth(const char *path);
+
+char *rootauthurl();
+
+void hashname(const char *filename,char hash[22]); //need length?
+
+void fill_authorization(const char *path,char *authstring,int authlen);

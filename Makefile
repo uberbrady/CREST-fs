@@ -30,7 +30,7 @@ memtest: crestfs.memtest
 
 	
 crestfs.static: Makefile crestfs.static.o resource.static.o common.static.o
-	$(gcc) $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o resource.static.o common.static.o libfuse.a -lpthread -ldl
+	$(gcc) $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o resource.static.o common.static.o libfuse.a -lpthread -ldl -lcrypt
 
 crestfs.static.o: crestfs.c Makefile
 	$(gcc)  -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o crestfs.static.o crestfs.c

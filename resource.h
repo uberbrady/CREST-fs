@@ -3,4 +3,6 @@
 #define DIRCACHEFILE "/.crestfs_directory_cachenode"
 
 
-FILE *get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose);
+FILE *get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *mode);
+
+int check_put(const char *path);
