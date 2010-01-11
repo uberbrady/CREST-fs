@@ -28,8 +28,11 @@
 #include "resource.h"
 #include "common.h"
 
+#include <pthread.h>
+
 //global variables (another one is down there but it's use is jsut there.
 char rootdir[1024]="";
+char cachedirname[1024]="";
 int maxcacheage=-1;
 
 
@@ -107,7 +110,7 @@ directory_iterator(char *directoryfile,iterator *iter,char *buf,int buflen)
 static int
 crest_getattr(const char *path, struct stat *stbuf)
 {
-	char header[HEADERLEN];
+	char header[HEADERLEN]="";
 
 	if (strcmp(path, "/") == 0) { /* The root directory of our file system. */
 		stbuf->st_mode = S_IFDIR | 0755;
@@ -138,13 +141,14 @@ crest_getattr(const char *path, struct stat *stbuf)
 				stbuf->st_nlink = 1;
 			} else {
 				int httpstatus=fetchstatus(header);
-				char date[80];
+				char date[80]="";
 				char length[80]="";
 
-				//brintf("Status: %d\n",httpstatus);
-				//brintf("Header you got was: %s\n",header);
+				brintf("Status: %d on path %s, Header: %s\n",httpstatus,path,header);
 				switch(httpstatus) {
 					case 200:
+					case 201:
+					case 204:
 					case 304:
 					//brintf("It is a file\n");
 					stbuf->st_mode = S_IFREG | 0755;
@@ -200,6 +204,9 @@ crest_getattr(const char *path, struct stat *stbuf)
 					}
 					return -EACCES;
 					break;
+					
+					default:
+					brintf("Weird http status, don't know what to do with it!!! It is: %d\n",httpstatus);
 				}
 				
 			}
@@ -240,7 +247,7 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 		brintf("Unsupported protocol, or missing 'location' header: %s\n",location);
 		return -ENOENT;
 	}
-	strlcpy(buf,rootdir,bufsize); //fs 'root'
+	strlcpy(buf,rootdir,bufsize); //fs cache 'root'
 	strlcat(buf,"/",bufsize);
 	strlcat(buf,location+7,bufsize);
 	
@@ -352,6 +359,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			id++;
 		}
 		brintf("Done with dir listing, returning...");
+		closedir(mydir);
 		return 0;
 	}
 
@@ -464,7 +472,47 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 	}
 }
 
+#include <sys/file.h>
+
+static int
+crest_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
+{
+	if(!fi) {
+		brintf("File Info is ZERO for path: %s\n",path);
+		return -EIO;
+	}
+	FILE *cachefile=(FILE *)(unsigned int)fi->fh;
+	//need to prolly flock() the *metadata* file or something here?
+	char metafilename[1024];
+	strlcpy(metafilename,METAPREPEND,1024);
+	strlcat(metafilename,"/",1024);
+	strlcat(metafilename,path,1024);
+	FILE *metafile=fopenr(metafilename+1,"w+");
+	//brintf("Uhm, our metafile is: %s\n",metafilename+1);
+	flock(fileno(metafile),LOCK_EX); // begin 'transactioney-thing'. EXCLUSIVE LOCK.
+	if(cachefile) {
+		if(fseek(cachefile,offset,SEEK_SET)==0) {
+			int results=fwrite(buf,1,size,cachefile);
+			markdirty(path);
+			faux_freshen_metadata(path);
+			fclose(metafile); //end transactoiney thing
+			//brintf("Truncate: %d, write: %d\n",truncres,writeres);
+			return results;
+		} else {
+			brintf("Failed to seek in file %s\n",path);
+			fclose(metafile);
+			return -EIO;
+		}
+	} else {
+		brintf("No cachefile ready for this file: %s.\n",path);
+		fclose(metafile);
+		return -EIO;
+	}
+}
+
+
 int	cachedir = 0;
+pthread_t putter;
 
 static void *
 crest_init(struct fuse_conn_info *conn __attribute__((unused)) )
@@ -472,7 +520,163 @@ crest_init(struct fuse_conn_info *conn __attribute__((unused)) )
 	//brintf("I'm not intending to do anything with this connection: %p\n",conn);
 	fchdir(cachedir);
 	close(cachedir);
+	
+	pthread_create(&putter, NULL, putting_routine,0);
 	return 0;
+}
+
+static int
+crest_chmod(const char *p __attribute__((unused)), mode_t mode __attribute__((unused)))
+{
+	return 0;
+}
+
+static int
+crest_chown(const char *p __attribute__((unused)), uid_t u __attribute__((unused)), gid_t g __attribute__((unused)))
+{
+	return 0;
+}
+
+static int
+crest_utime	(const char *p __attribute__((unused)), struct utimbuf *ut __attribute__((unused)))
+{
+	return 0;
+}
+
+static int
+crest_trunc (const char *path, off_t length)
+{
+	return truncate(path+1,length);
+}
+
+/* static int 
+crest_create(const char *path, mode_t m __attribute__((unused)), struct fuse_file_info *fi)
+{
+*//*	if(!wants_auth(path)) {
+		return -EACCES;
+	} */ /*
+	//I think crest_open does all the possible access-checking we'd need, anyways, so just call it
+	return crest_open(path,fi); //I think
+} */
+
+
+static int
+crest_mknod(const char*path,mode_t m, dev_t d __attribute__((unused)))
+{
+	brintf("Beginning mknod for %s\n",path);
+	//and create a file
+	if(!S_ISREG(m)) {
+		brintf("File you're requesting to make isn't regular, failo\n");
+		return -EACCES;
+	}
+	brintf("mknod: it's a regular file...\n");
+	char metafilename[1024];
+	strncpy(metafilename,METAPREPEND,1024);
+	strncat(metafilename,path,1024);
+	FILE * meta=fopenr(metafilename+1,"w+"); //CREATE IF NO EXIST!
+	if(!meta) {
+		brintf("COULD NOT CREATE METAFILE! %s",metafilename+1);
+		return -EIO;
+	}
+	brintf("mknod: meta file created.\n");
+	flock(fileno(meta),LOCK_EX);
+	FILE * data=fopenr((char *)path+1,"w+"); //CREATE if no exist.
+	if(!data) {
+		brintf("COULD not CREATE REAL FILE! %s",path+1);
+		fclose(meta);
+		return -EIO;
+	}
+	brintf("OK, fine - files created *AND* truncated!\n");
+	
+	markdirty(path); //path marked dirty so it will get 'put'
+	faux_freshen_metadata(path);
+	fclose(data);
+	fclose(meta); //causes unlock
+	return 0;
+}
+
+static int
+crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
+{
+	//THIS SHOULD BE DONE ASYNC INSTEAD! THIS IS WRONG! WILL NOT WORK DISCONNECTEDLY!!!!!!!
+	char dirpath[1024];
+	char *resultheaders=0;
+	strlcpy(dirpath,path,1024);
+	strlcat(dirpath,"/",1024);
+	int dontcare=http_request(dirpath,"PUT",0,"mkdir",0,0);
+	recv_headers(dontcare,&resultheaders,0);
+	close(dontcare);
+	return_keep(dontcare);
+	if(resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) < 300) {
+		free(resultheaders);
+		append_parents(path);
+		//should unlink my own metadeata, no?
+		char mymeta[1024];
+		strlcpy(mymeta,METAPREPEND,1024);
+		strlcat(mymeta,path,1024);
+		int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
+		brintf("I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
+		return 0;
+	} else {
+		free(resultheaders);
+		return -EACCES;
+	}
+}
+
+static int
+crest_symlink(const char *link, const char *path)
+{
+	/*
+	    symlink(symlinktarget,symlinkfile)
+		=->
+	    NB - 
+		relative link - symlinktarget="poo"
+		absolute link - symlinktarget="/crestmountpoint/domainname/directory/file"
+		absolute out-of-tree -        "/tmp/something/something"
+		relative, walkey             ="../../../whoknows/what/it/is"
+		
+		either file:// or http:// - out of tree is file:// ?
+	*/
+//this whole nifty 'resolve target' thing has to be scrapped for now
+/*	char resolvedpath[PATH_MAX]="";
+	realpath(link,resolvedpath);
+	brintf("symlinking %s to %s, resolves to: %s\n",path,link,resolvedpath);
+	if(strncmp(resolvedpath,cachedirname,strlen(cachedirname))!=0) { //for now only permit symlinks back into CREST-space...
+		brintf("Not starting with cachedir: %s\n",cachedirname);
+		return -EACCES;
+	} 
+	char newtarget[1024]="";
+	strlcpy(newtarget,"http://",1024);
+	strlcat(newtarget,resolvedpath+strlen(cachedirname)+2,1024);
+*/	//what a mess
+	FILE *f=fmemopen((void *)link,strlen(link),"r"); //this used to be ...(newtarget,strlen(newtarget)...)
+	char clen[1024];
+	snprintf(clen,1024,"Content-length: %d",strlen(link)); //also used to be strlen(netwraget)
+	int wha=http_request(path,"POST",0,"symlink",clen,f);
+	fclose(f);
+	char *headers=0;
+	void *body=0;
+	recv_headers(wha,&headers,&body);
+	close(wha);
+	return_keep(wha);
+	if(fetchstatus(headers)>=200 && fetchstatus(headers)<300) {
+		free(headers);
+		//symlink(newtarget,path); //let the caching handle this till we start doing stuff async
+		append_parents(path);
+		//should unlink my own metadeata, no? COPY-PASE FROM DIRECTORY THING ABOVE
+		char mymeta[1024];
+		strlcpy(mymeta,METAPREPEND,1024);
+		strlcat(mymeta,path,1024);
+		int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
+		brintf("(DIRECTORY) I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
+		return 0;
+	} else {
+		if(headers) {
+			free(headers);
+		}
+		brintf("Failed to make symlink: %s\n",headers);
+		return -EIO;
+	}
 }
 
 static struct fuse_operations crest_filesystem_operations = {
@@ -483,13 +687,24 @@ static struct fuse_operations crest_filesystem_operations = {
     .release = crest_release, /* to hold on to a filehandle to the cache so that reads are consistent with one generation of the file */
     .read    = crest_read,    /* To provide file content.           */
     .readdir = crest_readdir, /* To provide directory listing.      */
+    .write   = crest_write,   /* to write data, of course           */
+    .truncate= crest_trunc, 
+    //.create = crest_create,
+    .mknod   = crest_mknod,   /* mostly just for creating files     */
+
+    .mkdir   = crest_mkdir,   /* what do you think it's for, smart guy? */
+
+    .symlink = crest_symlink,
+
+    .chmod = crest_chmod,     //do-nothings
+    .chown = crest_chown,     //ditto
+    .utime = crest_utime,     //same-a-rino
 /*
     .mkdir = PUT (fuck MKCOL. fuck DAV. PUT with a slash at the end. M'k?)
     .unlink = (delete?)
     .rmdir = (still delete?)
     .symlink = (POST)
     .rename = MOVE - not liking new verbs today. maybe not. maybe DELETE followed by PUT
-    .write = 
     .statfs - would be nice but I don't know how that would work....
     .flush??????????
     .fsync?
@@ -658,6 +873,7 @@ main(int argc, char **argv)
 		brintf("%d no open cachedir\n",cachedir);
 		exit(2);
 	}
+	strlcpy(cachedirname,argv[2],1024);
 	maxcacheage=atoi(argv[3]);
 	if(maxcacheage<=0) {
 		brintf("%d is not a valid max cache age\n",maxcacheage);

@@ -57,6 +57,33 @@ asprintf(char **ret, const char *format, ...)
 #endif
 
 /* utility functions for debugging, path parsing, fetching, etc. */
+#include <sys/stat.h>
+
+void redirmake(const char *path)
+{
+	char *slashloc=(char *)path;
+	while((slashloc=strchr(slashloc,'/'))!=0) {
+		char foldbuf[1024];
+		int slashoffset=slashloc-path+1;
+		int mkfold=0;
+		strlcpy(foldbuf,path,1024);
+		foldbuf[slashoffset-1]='\0'; //why? I guess the pointer is being advanced PAST the slash?
+		mkfold=mkdir(foldbuf,0700);
+		//brintf("Folderbuffer is: %s, status is: %d\n",foldbuf,mkfold);
+		if(mkfold!=0) {
+			//brintf("Here's why: %s\n",strerror(errno));
+		}
+		slashloc+=1;//iterate past the slash we're on
+	}
+}
+
+FILE *
+fopenr(char *filename,char*mode)
+{	
+	redirmake(filename);
+	return fopen(filename,mode);
+}
+
 
 
 void brintf(char *format,...)
@@ -198,12 +225,12 @@ fetchheader(char *headers,char *name,char *results,int length)
 }
 
 int
-fetchstatus(char *headers)
+fetchstatus(const char *headers) //what?! Why do I have to qualify this?
 {
-	char status[4];
+	char status[4]="";
 	// HTTP/1.0 200 BLah
 	
-	if(strlen(headers)<strlen("HTTP/1.0 xyz")) {
+	if(strlen(headers)<strlen("HTTP/1.0 xyz")) { //what the hell is this about? valgrind is complaining about strlen
 		return 404;
 	}
 	strncpy(status,headers+9,3);
@@ -250,10 +277,12 @@ rootauthurl()
 		if(_userpass[strlen(_userpass)-1]=='\n') {
 			_userpass[strlen(_userpass)-1]='\0';
 		}
-		fclose(authfp);
 	}
+	fclose(authfp);
 	return _staticauthfile;
 }
+
+#include <pthread.h>
 
 pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
 
@@ -280,7 +309,7 @@ wants_auth(const char *path)
 	if(path[0]=='/') {
 		path=path+1; //skip leading slashes methinks, FS-style path arrays tend to have them
 	}
-	if (strlen(rau)>0 && strncmp(rau,path,strlen(rau))==0) {
+	if (rau && strlen(rau)>0 && strncmp(rau,path,strlen(rau))==0) {
 		return _userpass;
 	} else {
 		return 0;
@@ -356,4 +385,334 @@ fill_authorization(const char *path,char *authstring,int authlen)
 	if(strlen(authstring)>(unsigned)authlen) {
 		exit(57);
 	}
+}
+
+
+//PUT support routines?
+
+
+#define PENDINGDIR ".crestfs_pending_writes"
+
+#include <unistd.h>
+#include <sys/stat.h>
+
+void 
+markdirty(const char *filename)
+{
+	char hash[23];
+	char pendplace[1024];
+	char mangledfilename[1024];
+	hashname(filename,hash);
+	strlcpy(pendplace,PENDINGDIR,1024);
+	strlcat(pendplace,"/",1024);
+	strlcat(pendplace,hash,1024);
+	mkdir(PENDINGDIR,0700);
+	
+	strlcpy(mangledfilename,"..",1024);
+	strlcat(mangledfilename,filename,1024);
+	symlink(mangledfilename,pendplace);
+}
+
+int check_put(const char *path)
+{
+	char hash[23];
+	hashname(path,hash);
+	char putpath[1024];
+	strlcpy(putpath,PENDINGDIR,1024);
+	strlcat(putpath,"/",1024);
+	strlcat(putpath,hash,1024);
+	struct stat dontcare;
+	brintf("I am checking path: %s for path: %s\n",putpath,path);
+	return (lstat(putpath,&dontcare)==0);
+}
+
+char *okstring="HTTP/1.1 200 OK\r\nEtag: \"\"\r\n\r\n";
+//The blank etag is actually necessary to trigger proper stat's of the written file. UGH.
+
+#include "resource.h" //needed for putting_routine and invalidate_parents
+
+void
+faux_freshen_metadata(const char *path) //cleans and silences metadata for reasonable results to stat()'s, possibly before a file's been actually uploaded
+{
+	char metafilename[1024];
+	strlcpy(metafilename,METAPREPEND,1024);
+	strlcat(metafilename,path,1024);
+	FILE *metafile=fopen(metafilename+1,"w");
+	if(metafile) {
+		int writeres=fwrite(okstring,1,strlen(okstring)+1,metafile);
+		if(writeres !=0) {
+			brintf("rewriting metafile had some problems: write: %d\n",writeres);
+		}
+		fclose(metafile);
+	} else {
+		brintf("Could not open/create metafile for faux-freshen! Silently continuing, I guess?\n");
+	}
+}
+
+#include <libgen.h> //for dirname()
+
+///this function will prolly end up deprecated...
+void
+invalidate_parents(const char *origpath)
+{
+	char path[1024];
+	strncpy(path,origpath,1024);
+	char * basepath=dirname((char *)path+1);
+	char parentdir[1024];
+	strncpy(parentdir,basepath,1024);
+	strncat(parentdir,DIRCACHEFILE,1024);
+
+	char parentmetadir[1024];
+	strncpy(parentmetadir,METAPREPEND,1024);
+	strncat(parentmetadir,"/",1024);
+	strncat(parentmetadir,parentdir,1024);
+
+	int pd=unlink(parentdir); //the actual listing...
+	int pdm=unlink(parentmetadir+1); //the metadata about the listing
+	brintf("I tried to unlink some parentals for cache-invalidation - parentdir itself (%s) got me: %d; parentmetadir (%s) got: %d\n",
+		parentdir,pd,parentmetadir+1,pdm);
+	//cached directory now invalidated	
+}
+
+#include <utime.h>
+
+void 
+append_parents(const char *origpath)
+{
+	char path[1024];
+	char namepath[1024];
+	strncpy(path,origpath,1024);
+	strncpy(namepath,origpath,1024);
+	char * basepath=dirname((char *)path+1);
+	char * appendme=basename(namepath+1);
+	char parentdir[1024];
+	strncpy(parentdir,basepath,1024);
+	strncat(parentdir,DIRCACHEFILE,1024);
+
+	char parentmetadir[1024];
+	strncpy(parentmetadir,METAPREPEND,1024);
+	strncat(parentmetadir,"/",1024);
+	strncat(parentmetadir,parentdir,1024);
+
+	FILE *p=fopen(parentdir,"a");
+	if(p) {
+		fputs("\n<a href='",p);
+		fputs(appendme,p);
+		fputs("'>",p);
+		fputs(appendme,p);
+		fputs("</a>\n",p);
+		fclose(p);
+		int pdm=utime(parentmetadir+1,0); //the metadata about the listing.
+							//I'm not sure I like this - it 'freshens' the listing, possibly incorrectly
+		brintf("I tried to augment the parentals parentdir itself (%s) got me: %p; parentmetadir (%s) got: %d\n",
+			parentdir,p,parentmetadir+1,pdm);
+	} else {
+		brintf("Couldn't open parentdir: %s, I don't know if that's a bad thing or not...leaving everything alone...\n",parentdir);
+	}
+	
+	//cached directory now invalidated	
+}
+
+
+#include <dirent.h>
+#include <sys/file.h>
+
+
+#include <errno.h>
+
+
+#define IDLETIME 10
+
+void *
+putting_routine(void *unused __attribute__((unused)))
+{
+	while(1) {
+		brintf("I like to put things\n");
+		DIR *pendingdir=opendir(PENDINGDIR);
+		struct dirent mydirent;
+		struct dirent *dp=0;
+		memset(&mydirent,0,sizeof(mydirent));
+		if(pendingdir==0) {
+			brintf("Error opening pendingdir is: %s\n",strerror(errno));
+			sleep(10);
+			continue;
+		}
+		int sleeptime=10;
+		while(readdir_r(pendingdir,&mydirent,&dp)==0) {
+			if(dp==0) {
+				brintf("End of directory?\n");
+				break;
+			}
+			char *headerpointer=0;
+			if(strcmp(dp->d_name,".")==0 || strcmp(dp->d_name,"..")==0) {
+				continue;
+			}
+			char linkname[1024];
+			strlcpy(linkname,PENDINGDIR,1024);
+			strlcat(linkname,"/",1024);
+			strlcat(linkname,dp->d_name,1024);
+			char linktarget[1024];
+			int s=-1;
+			s=readlink(linkname,linktarget,1024);
+			linktarget[s]='\0';
+			brintf("Look! I found this one: %s -> %s\n",dp->d_name,linktarget);
+			//lock the metadata file, PUT the results, and close the lock (opened FILE *)
+			char metafilename[1024];
+			strlcpy(metafilename,METAPREPEND,1024);
+			strlcat(metafilename,linktarget+2,1024);
+
+			struct stat st;
+			if(stat(linkname,&st)!=0) {
+				brintf("Couldn't stat our file! Going to next iteration of loop\n");
+				continue;
+			}
+			int fileage=time(0) - st.st_mtime;
+			brintf("Checking if File has been around long enough - IDLETIME is: %d, file age is %d, old sleep time was: %d, new sleep time might be: %d\n",
+				IDLETIME,fileage,sleeptime,IDLETIME-fileage);
+			if( fileage < IDLETIME) {
+				brintf("No it has NOT\n");
+				if((IDLETIME - fileage) >0 && (IDLETIME - fileage) <sleeptime) {
+					sleeptime=IDLETIME-fileage;
+				}
+				continue;
+			} else {
+				brintf("File is old enough, continue processing it\n");
+			}
+
+			FILE *metafile=fopen(metafilename+1,"r+");
+			int lck=-1;
+			if(metafile) {
+				lck=flock(fileno(metafile),LOCK_EX);
+			}
+			brintf("We are going to try to open metafile: %s. results: %p. lockstatus: %d\n",metafilename+1,metafile,lck);
+			FILE *contentfile=fopen(linktarget+3,"r");
+			brintf("Content file is: %s (%p)\n",linktarget+3,contentfile);
+			char *headerplus;
+			asprintf(&headerplus,"Content-length: %d",(int)st.st_size);
+			
+			//http_request(char *fspath,char *verb,char *etag, char *referer,char *extraheaders,FILE *body)
+			brintf("Our link target for today is: %s\n",linktarget+2);
+			int fd=http_request(linktarget+2,"PUT",0,"putting_routine",headerplus,contentfile);
+			fclose(contentfile);
+			free(headerplus);
+			if(fd<=0) {
+				brintf("Seriously weird problem with http_request, going for next iteration in loop...(%s)\n",strerror(errno));
+				free(headerpointer);
+				fclose(metafile);
+				continue;
+			}
+			recv_headers(fd,&headerpointer,0);
+			
+			int status=fetchstatus(headerpointer);
+			
+			if(status==200 || status==201 || status==204) {
+				char etag[1024]="";
+				char sanitized_headers[1024]="";
+				ftruncate(fileno(metafile),0);
+				brintf("RECEIVED HEADERS SAY: %s\n",headerpointer);
+				fetchheader(headerpointer,"etag",etag,1024);
+				snprintf(sanitized_headers,1024,"HTTP/1.0 %d Synthetic Header\r\n",fetchstatus(headerpointer));
+				if(strlen(etag)>0) { 
+					strlcat(sanitized_headers,"Etag: ",1024);
+					strlcat(sanitized_headers,etag,1024);
+					strlcat(sanitized_headers,"\r\n",1024);
+				}
+				strlcat(sanitized_headers,"\r\n",1024);
+				fputs(sanitized_headers,metafile);
+				fputc('\0',metafile);
+				//fputs(headerpointer,metafile);
+				
+
+				//then readback headers, write them to headerfile, 
+				close(fd);
+				return_keep(fd);
+				unlink(linkname);//now that we're done, toss the symlink
+				free(headerpointer);
+	
+				//need to invalidate parent directory's cached info (as it shall no longer be valid)
+				append_parents(linktarget+2); //that's the fuse-related path (with leading forward-slash) for the file we just put.
+				
+				fclose(metafile);//unlock, end transaction
+			} else {
+				brintf("Status isn't in the 200 range I'm expecting: %d\n",status);
+				brintf("Headers for fail are: %s\n",headerpointer);
+				free(headerpointer);
+				close(fd);
+				return_keep(fd);
+				fclose(metafile);
+			}
+			
+		}
+		sleep(10);
+		closedir(pendingdir);
+	}
+	return 0;
+}
+
+#include <sys/socket.h>
+#include <errno.h>
+
+int 
+recv_headers(int mysocket,char **headerpointer,void **bodypiece)
+{
+	char *mybuffer=calloc(65535,1);
+	int bytes=0;
+	char *bufpointer=mybuffer;
+	int remainderpiece=-1;
+	
+	//first fetch headers into headerfile, then fetch body into body file
+	//wait,we cant do that. if we're "accelerating" a supposed directory, or we're GET'ing an entity that turns out to be a directory,
+	//we won't want to write the headerfiles here.
+	
+	//also, if this turned out to be a HEAD, we can't write to the data-cachefile
+	while ((bytes = recv(mysocket,bufpointer,65535-(bufpointer-mybuffer),0)) && bufpointer-mybuffer < 65535) {
+		char *headerend=0;
+		//brintf("RECV'ed: %d bytes, into %p\n",bytes,bufpointer);
+		if(bytes==-1 && errno == EAGAIN) {
+			brintf("EAGAIN while receving, retrying\n");
+			continue; //force pulling from cache
+		}
+		if(bytes<=0) {
+			//the EAGAIN option we handled already, above.
+			//otherwise BREAK
+			break;
+		}
+		bufpointer=(bufpointer+bytes);
+		
+		//keep looking for \r\n\r\n in the header we've got...
+		//once we've got that, check status
+		if((headerend = strstr(mybuffer,"\r\n\r\n"))) {
+			//found the end of the headers!
+			//brintf("FOund the end of the headers! this many bytes: %d\n",headerend-mybuffer);
+			headerend+=4;
+
+			if(headerend-mybuffer>=65535) {
+				brintf("Header overflow, I bail.\n");
+				exit(99);
+			}
+			if(headerpointer) {
+				*headerpointer=malloc(headerend-mybuffer+1);
+				strncpy(*headerpointer,mybuffer,headerend-mybuffer);
+				(*headerpointer)[headerend-mybuffer]='\0';
+			}
+			remainderpiece=bufpointer-headerend;
+			brintf("REMAINDER PIECE: %d\n",remainderpiece);
+			if(bodypiece) {
+				if(remainderpiece>0) {
+					//how do we figure out the length of the body piece?
+					//bufpointer is *now* at the end of the chunk of data, so it should be easy!
+					*bodypiece=malloc(remainderpiece);
+					memcpy(*bodypiece,headerend,remainderpiece);
+				} else {
+					*bodypiece=0;
+				}
+			}
+			free(mybuffer);
+			return remainderpiece;
+		}
+	}
+	free(mybuffer);
+	*headerpointer=0;
+	*bodypiece=0;
+	return -1;
 }

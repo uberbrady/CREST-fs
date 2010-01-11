@@ -13,7 +13,7 @@ CFLAGS=-D_FILE_OFFSET_BITS=64 -g
 
 ALL: crestfs
 
-crestfs: crestfs.static
+crestfs: crestfs.static crestfs.dynamic
 	cp crestfs.static crestfs
 
 
@@ -42,24 +42,27 @@ common.static.o: common.c common.h
 	$(gcc) -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLASG) -o common.static.o common.c
 
 
-crestfs.dynamic: crestfs.o Makefile
+crestfs.dynamic: crestfs.o resource.o common.o Makefile
 	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
-	gcc -g -Wall -Werror -o crestfs.dynamic crestfs.o -lfuse
+	gcc -g -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o -lfuse -lcrypt -lpthread
 	#gcc -static -g -Wall -Werror -o crestfs.static crestfs.o -lfuse
 
 crestfs.o: crestfs.c Makefile
 	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	gcc $(CFLAGS) -Wall -Werror -c -o crestfs.o crestfs.c
 	
-resource.o: resource.h resource.h Makefile
+resource.o: resource.h resource.c Makefile
 	gcc $(CFLAGS) -Wall -Werror -c -o resource.o resource.c
+	
+common.o: common.c common.h resource.h Makefile
+	gcc $(CFLAGS) -Wall -Werror -c -o common.o common.c
 
 
 boottest: crestfs.static crestfs.dynamic
 	rm -rf /tmp/bootcache
 	mkdir -p /tmp/bootcache
-	cp -Rp /root/universix/infinix_primed_bootstrap/{desk.nu,.crestfs_metadata_rootnode} /tmp/bootcache
-	valgrind --leak-check=full --log-file=/tmp/valout.txt ./crestfs.dynamic /http /tmp/bootcache 60 -s -d -f 1> /tmp/b1.out 2> /tmp/b2.out &
+	cp -Rp /root/lightdesktop/initramfs_bootstrap/.crestcache/{fs.lightdesktop.com,.crestfs_metadata_rootnode} /tmp/bootcache
+	valgrind --leak-check=full --log-file=/tmp/valout.txt ./crestfs.dynamic /http /tmp/bootcache 60 /dev/null -s -d -f 1> /tmp/b1.out 2> /tmp/b2.out &
 	#PATH="${PATH}:/root/universix/infinix_filesystem/sbin/" /root/universix/update
 	cd /root/universix/infinix_primed_bootstrap && find . -type f -and \! -name .crestfs_metadata_rootnode -and \! -name .crestfs_directory_cachenode -exec ls -al /http/'{}' \;
 	umount /http

@@ -1,0 +1,25 @@
+Here's a description of the protocol and filesystem used in CREST-fs
+
+GET /path/blah/blah/myresource.blah
+
+Is used to read the contents of a resource
+
+
+
+GET /path/to/folder is also used to retrieve directory contents, if 'folder' is a directory, then CREST expects to be redirected to:
+
+GET /path/to/folder/ <-- notice the trailing slash
+
+
+
+Folder contents don't have to be in HTML, but resources within need to be described as follows:
+
+<a href='resource'>resource</a>
+
+Note that the 'href' attribute and the resource name are identical. "Links" where they are _not_ identical will not be counted as resources.
+
+
+HTTP Redirects will be interpreted as 'symlinks'.
+
+e.g. when you request http://something.com/blah/blah and get a redirect to http://something.com/foo/bar, that will be interpreted in the filesystem as "something.com/blah/blah is a symlink to something.com/foo/bar"
+
