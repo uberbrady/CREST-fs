@@ -712,7 +712,11 @@ recv_headers(int mysocket,char **headerpointer,void **bodypiece)
 		}
 	}
 	free(mybuffer);
-	*headerpointer=0;
-	*bodypiece=0;
+	if(headerpointer) {
+		*headerpointer=0;
+	}
+	if(bodypiece) {
+		*bodypiece=0;
+	}
 	return -1;
 }

@@ -23,3 +23,9 @@ HTTP Redirects will be interpreted as 'symlinks'.
 
 e.g. when you request http://something.com/blah/blah and get a redirect to http://something.com/foo/bar, that will be interpreted in the filesystem as "something.com/blah/blah is a symlink to something.com/foo/bar"
 
+Received Last-Modified headers will read as mtimes
+
+Etags will be used with conditional GET's to aggressive cache and fetch changes to files.
+
+The X-Bespin-CREST: HTTP header is required on all pages! This is to detect a web service provider that is redirecting requests, ro messing with DNS.
+

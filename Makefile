@@ -49,13 +49,13 @@ crestfs.dynamic: crestfs.o resource.o common.o Makefile
 
 crestfs.o: crestfs.c Makefile
 	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
-	gcc $(CFLAGS) -Wall -Werror -c -o crestfs.o crestfs.c
+	gcc $(CFLAGS) -Wall -W -Werror -c -o crestfs.o crestfs.c
 	
 resource.o: resource.h resource.c Makefile
-	gcc $(CFLAGS) -Wall -Werror -c -o resource.o resource.c
+	gcc $(CFLAGS) -Wall -W -Werror -c -o resource.o resource.c
 	
 common.o: common.c common.h resource.h Makefile
-	gcc $(CFLAGS) -Wall -Werror -c -o common.o common.c
+	gcc $(CFLAGS) -Wall -W -Werror -c -o common.o common.c
 
 
 boottest: crestfs.static crestfs.dynamic
