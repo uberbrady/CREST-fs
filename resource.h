@@ -7,3 +7,5 @@ int http_request(const char *fspath,char *verb,char *etag, char *referer,char *e
 FILE *get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *mode);
 
 void return_keep(int fd);
+
+void wastebody(char *selectedverb,int mysocket,char *received_headers);

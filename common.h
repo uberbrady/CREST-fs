@@ -30,7 +30,7 @@ extern char authfile[256];
 
 void reanswer(char *string,regmatch_t *re,char *buffer,int length);
 
-int recv_headers(int fd,char **headerpointer,void **bodypiece); //http-related? 
+int recv_headers(int fd,char **headerpointer); //http-related? 
 //ALLOCATES headerpointer (fills it), and allocates and fills bodypiece and returns its size
 //bodypiece is a small chunk of the body section
 

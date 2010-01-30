@@ -589,7 +589,8 @@ crest_mknod(const char*path,mode_t m, dev_t d __attribute__((unused)))
 	brintf("OK, fine - files created *AND* truncated!\n");
 	
 	markdirty(path); //path marked dirty so it will get 'put'
-	faux_freshen_metadata(path);
+	faux_freshen_metadata(path); //make my metadata look new but have crappy etags
+	append_parents(path); //make it look like I've been appended to my parents directory listings!
 	fclose(data);
 	fclose(meta); //causes unlock
 	return 0;
@@ -604,9 +605,10 @@ crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 	strlcpy(dirpath,path,1024);
 	strlcat(dirpath,"/",1024);
 	int dontcare=http_request(dirpath,"PUT",0,"mkdir",0,0);
-	recv_headers(dontcare,&resultheaders,0);
-	close(dontcare);
-	return_keep(dontcare);
+	recv_headers(dontcare,&resultheaders);
+	wastebody("PUT",dontcare,resultheaders); //we may have received a body, get rid.
+	//close(dontcare); //no, that's poor manners.
+	return_keep(dontcare); //that's nicer.
 	if(resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) < 300) {
 		free(resultheaders);
 		append_parents(path);
@@ -655,9 +657,9 @@ crest_symlink(const char *link, const char *path)
 	int wha=http_request(path,"POST",0,"symlink",clen,f);
 	fclose(f);
 	char *headers=0;
-	void *body=0;
-	recv_headers(wha,&headers,&body);
-	close(wha);
+	recv_headers(wha,&headers);
+	wastebody("POST",wha,headers);
+	//close(wha); //How rude!
 	return_keep(wha);
 	if(fetchstatus(headers)>=200 && fetchstatus(headers)<300) {
 		free(headers);

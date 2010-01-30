@@ -330,6 +330,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 	
 	//brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
 	
+	brintf("http_request: VERB: %s, URL: %s, referer: %s, extraheaders: %s, body pointer: %p\n",verb,fspath,referer,extraheaders,body);
 	start=time(0);
 	//brintf("Getaddrinfo timing test: BEFORE: %ld\n",start);
 	
@@ -452,7 +453,10 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 			char modrefer[1024];
 			strlcpy(modrefer,referer,1024);
 			strlcat(modrefer,"+refetch",1024);
-			return http_request(fspath,verb,etag,modrefer,0,0);
+			if(body) {
+				rewind(body);
+			}
+			return http_request(fspath,verb,etag,modrefer,extraheaders,body);
 		} else {
 			return 0;
 		}
@@ -462,77 +466,82 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 }
 
 int
-straight_handler(int contentlength,int fdesc,FILE *datafile,void *bodypart,int bodypartsize)
+straight_handler(int contentlength,int fdesc,FILE *datafile)
 {
-	//brintf("These are how many bytes are in the Remnant: %d out of %d read\n",bufpointer-headerend,bytes);
-	//brintf("Here's the data you should be writing: %hhd %hhd %hhd\n",headerend[0],headerend[1],headerend[2]);
-	//brintf("Datafile is: %p\n",datafile);
-	fwrite(bodypart,bodypartsize,1,datafile);
-	if(bodypartsize>=contentlength) {
-		brintf("Remnant write is enough to satisfy request, not going into While loop.\n");
-	} else {
-		int blocklen=65535;
-		int bytes=-1;
-		int bodybytes=0;
-		if(contentlength-bodypartsize>65535) {
-			blocklen=65535;
-		} else {
-			blocklen=contentlength-bodypartsize;
-		}
-		brintf("Blockeln is: %d\n",blocklen);
-		if(blocklen>0) {
-			char *mybuffer=malloc(blocklen);
-			while((bytes = recv(fdesc,mybuffer,blocklen,0))) { //re-use existing buffer
-				if(bytes==-1 && errno==EAGAIN) {
-					brintf("Recv reported EAGAIN\n");
-					continue;
-				}
-				if(bytes<=0) {
-					brintf("Recv returned 0 or -1. FAIL?: cause: %s\n",strerror(errno));
-					return 0; //maybe?!?!!?
-					break;
-				}
-				fwrite(mybuffer,bytes,1,datafile);
-				bodybytes+=bytes;
-				//brintf("Read %d bytes, expecting total of %d(%s), curerently at: %ld\n",bytes,readlen,contentlength,curbytes);
-				if(bodybytes>=contentlength) {
-					brintf("Okay, read enough data, bailing out of recv loop. Read: %ld, expecting: %d\n",ftell(datafile),contentlength);
-					free(mybuffer);
-					mybuffer=0;
-					break;
-				}
-				if(contentlength-bodybytes>65535) {
-					blocklen=65535;
-				} else {
-					blocklen=contentlength-bodybytes;
-				}
+	int blocklen=65535;
+	int bytes=-1;
+	int bodybytes=0;
+	if(contentlength < 65535) {
+		blocklen=contentlength;
+	}
+	brintf("Blockeln is: %d. File descriptor is: %d\n",blocklen,fdesc);
+	if(blocklen>0) {
+		char *mybuffer=malloc(blocklen);
+		while((bytes = recv(fdesc,mybuffer,blocklen,0))) { //re-use existing buffer
+			if(bytes==-1 && errno==EAGAIN) {
+				brintf("Recv reported EAGAIN\n");
+				continue;
 			}
-			if (mybuffer) {
+			if(bytes<=0) {
+				brintf("Recv returned 0 or -1. FAIL?: cause: %s\n",strerror(errno));
+				return 0; //maybe?!?!!?
+				break;
+			}
+			brintf("okay, we finished with teh stupid eagains. What's going on?\n");
+			fwrite(mybuffer,bytes,1,datafile);
+			bodybytes+=bytes;
+			brintf("Read %d bytes, expecting total of %d, curerently at: %d\n",bytes,contentlength,bodybytes);
+			if(bodybytes>=contentlength) {
+				brintf("Okay, read enough data, bailing out of recv loop. Read: %ld, expecting: %d\n",ftell(datafile),contentlength);
 				free(mybuffer);
+				mybuffer=0;
+				break;
 			}
+			if(contentlength-bodybytes>65535) {
+				blocklen=65535;
+			} else {
+				blocklen=contentlength-bodybytes;
+			}
+		}
+		if (mybuffer) {
+			free(mybuffer);
 		}
 	}
 	return 1;
 }
 
 int
-chunked_handler(int fdesc,FILE *datafile,void *bodypart,int bodypartsize)
+chunked_handler(int fdesc,FILE *datafile)
 {
-	FILE *webs=fdopen(fdesc,"r");
-	int i=-1;
+	int fd2=dup(fdesc);
+	FILE *webs=fdopen(fd2,"r");
 	int chunkbytes=-1;
-	for(i=bodypartsize-1;i>=0;i--) {
-		ungetc(((char *)bodypart)[i],webs);
+	if(!webs) {
+		brintf("I could not open webs from file descriptor :%d\n",fdesc);
 	}
-	
-	//pseudocode for the filedescriptor part - (much easier)
+	brintf("Beginning Chunk HAndlings!\n");
 	while(chunkbytes!=0) {
-		char lengthline[16];
+		char lengthline[16]="";
 		char *badchar=0;
-		fgets(lengthline,16,webs);
+		if(fgets(lengthline,16,webs)==0) {
+			if(feof(webs))
+				brintf("EOF\n");
+			if(ferror(webs))
+				brintf("FERROR\n");
+			fclose(webs);
+			return 0; //FAIL
+		}
 		chunkbytes=strtoul(lengthline,&badchar,16);
 		brintf("Starting a chunk, lengthline is: '%s', numerically that's: %d And 'badchar' portion of string is: '%s', badchar strlen is: %d, [%hhd,%hhd]\n",
 			lengthline,chunkbytes,badchar,strlen(badchar),badchar[0],badchar[1]);
+			
+		if(badchar==lengthline) {
+			brintf("We handled NOTHING. This shit is TOTALLY MESSED UP\n");
+			brintf("chunked - we expected a size, and got something that wouldn't parse at all\n");
+			brintf("we should exit, but why don't we continue instead and read another line for fun?\n");
+			chunkbytes=-1;
+			continue;
+		}
 		
 		int readbytes=0;
 		char *buffer=malloc(chunkbytes);
@@ -557,9 +566,26 @@ chunked_handler(int fdesc,FILE *datafile,void *bodypart,int bodypartsize)
 		}
 		free(buffer);
 	}
+	fclose(webs);
 	return 1;
 }
 
+void
+wastebody(char *selectedverb,int mysocket,char *received_headers)
+{
+	if(strncasecmp(selectedverb,"GET",4)==0 || strncasecmp(selectedverb,"POST",5)==0) {
+		FILE *waster=fopen("/dev/null","w");
+		char transferencoding[1024];
+		fetchheader(received_headers,"transfer-encoding",transferencoding,1024);
+		if(strncasecmp(transferencoding,"chunked",1024)==0) {
+			chunked_handler(mysocket,waster);
+		} else {
+			char contentlength[1024];
+			fetchheader(received_headers,"content-length",contentlength,1024);
+			straight_handler(strtol(contentlength,0,10),mysocket,waster);
+		}
+	}
+}
 /*
 int
 chunked_handler(char chunk_size[11],void *data,int length,FILE *fp)
@@ -787,7 +813,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		//fock()
 		brintf("Instantiating non-existent metadata cachefile for something.\n");
 		if(!(headerfile=fopenr(headerfilename,"w+x"))) {
-			brintf("RACE CAUGHT ON FILE CREATION! NOt sure what to do about it though... reason: %s. How bout we just fail it?\n",strerror(errno));
+			brintf("RACE CAUGHT ON FILE CREATION for %s! NOt sure what to do about it though... reason: %s. How bout we just fail it?\n",headerfilename,strerror(errno));
 			free(headerbuf);
 			return 0;
 			//headerfile=fopenr(headerfilename,"w"); //this means a race was found and prevented(?)
@@ -804,29 +830,18 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	
 	if(mysocket > 0) {
 		char *received_headers=0;
-		void *bodybuf=0;
-		int bodybytes=recv_headers(mysocket,&received_headers,&bodybuf);
-		if(bodybytes>=0) {
+		if(recv_headers(mysocket,&received_headers)) {
 			char connection[1024]="";
 			char crestheader[1024]="";
 			FILE *datafile=0;
-			int i;
 
-			brintf("I HAVE SOME STUFF! Here's bodybuff size: %d:\n",bodybytes);
-			for(i=0;i<bodybytes;i++) {
-				brintf("%c",((char *)bodybuf)[i]);
-			}
-			brintf("\n");
 			brintf("Here's the headers, btw: %s\n",received_headers);
-			brintf("How're those headers and body pieces? Good, right?\n");
 
 			fetchheader(received_headers,"Connection",connection,1024);
 			if(strcasecmp(connection,"close")==0) {
 				brintf("HTTP/1.1 pipeline connection CLOSED, yanking from list.");
 				delete_keep(mysocket);
 			}
-			if(strcasecmp(connection,"close")==0)
-				close(mysocket);
 
 			//special case for speed - on a 304, the headers probably haven't changed
 			//so don't rewrite them (fast fast!)
@@ -844,9 +859,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				free(received_headers);
 				if(strcasecmp(connection,"close")==0)
 					close(mysocket);
-				free(bodybuf);
 				free(headerbuf);
 				return_keep(mysocket);
+				if(strcasecmp(connection,"close")==0)
+					close(mysocket);
 				return datafile;
 			}
 
@@ -912,10 +928,6 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						unlink(cachefilebase);
 						if(strcasecmp(connection,"close")==0)
 							close(mysocket);
-						if(bodybuf) {
-							brintf("I don't know how it's possible, but you have a bodybuff on a HEAD request?!: '%s'\n",(char *)bodybuf);
-							free(bodybuf);
-						}
 						return_keep(mysocket);
 						free(headerbuf);
 						return 0;// NO CONTENTS TO DEAL WITH HERE!
@@ -933,9 +945,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					}
 					
 					if(chunked) {
-						chunked_handler(mysocket,datafile,bodybuf,bodybytes);
+						chunked_handler(mysocket,datafile);
 					} else {
-						straight_handler(readlen,mysocket,datafile,bodybuf,bodybytes);
+						straight_handler(readlen,mysocket,datafile);
 					}
 					
 					if(rename(tempfile,cachefilebase)) {
@@ -953,24 +965,6 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						close(mysocket);
 					free(headerbuf);
 					return_keep(mysocket);
-					free(bodybuf);
-					return datafile;
-					break;
-
-					case 304:
-					//copy the newly found headers to the headerfile (to get the new Date: header),
-					//return the EXISTING FILE buffer (no change)
-					//we do *NOT* want any remnants from the netowrk'ed gets, we're going to let them die in the buffer
-					brintf("This should NEVER RUN!!!!");
-					exit(98);
-					datafile=fopen(cachefilebase,cachefilemode); //use EXISTING basefile...
-					fclose(headerfile); // RELEASE LOCK
-					free(received_headers);
-					if(strcasecmp(connection,"close")==0)
-						close(mysocket);
-					return_keep(mysocket);
-					free(bodybuf);
-					free(headerbuf);
 					return datafile;
 					break;
 
@@ -983,6 +977,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					//IF NOT! Treat as symlink(?!). Write headers to headerfile. return no data (or empty file?)
 					//NB. Requires a change to readlink()
 					//there is NO datafile to work with here, but we don't return 0...how's that gonna work?
+					wastebody(selectedverb,mysocket,received_headers);
 
 					fetchheader(received_headers,"location",location,1024);
 					if(strcmp(location,"")!=0 && location[strlen(location)-1]=='/') {
@@ -1000,9 +995,11 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						char modpurpose[1024];
 						strlcpy(modpurpose,purpose,1024);
 						strlcat(modpurpose,"+directoryrefetch",1024);
-						free(bodybuf);
 						free(headerbuf);
 						return_keep(mysocket);
+						//TEMP WORKAROUND FIX FOR POSSIBLE BUG ISOLATION STUFF?!
+						//delete_keep(mysocket);
+						//close(mysocket);
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode);
 					}
 					//otherwise (no slash at end of location path), we must be a plain, boring symlink or some such.
@@ -1012,7 +1009,6 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					free(received_headers);
 					if(strcasecmp(connection,"close")==0)
 						close(mysocket);
-					free(bodybuf);
 					free(headerbuf);
 					return_keep(mysocket);
 					return 0; //do we return a filepointer to an empty file or 0? NOT SURE!
@@ -1024,6 +1020,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					//and RETRY REQUEST!!!
 
 					//be prepared to drop a 404 cachefile! This will prevent repeated requests for nonexistent entities
+					wastebody(selectedverb,mysocket,received_headers);
 					if(dirmode) {
 						//we 404'ed (or 403'ed) in dirmode. Shit.
 						char headerdirname[1024];
@@ -1041,7 +1038,6 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						char modpurpose[1024];
 						strlcpy(modpurpose,purpose,1024);
 						strlcat(modpurpose,"+plainrefetch",1024);
-						free(bodybuf);
 						return_keep(mysocket);
 						free(headerbuf);
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode);
@@ -1051,12 +1047,12 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 
 					case 403: //forbidden
 					case 401: //requires authentication
+					wastebody(selectedverb,mysocket,received_headers);
 					brintf("404/403/401 mode, I *may* be closing the cache header file...\n");
 					brintf(" Results: %d",fclose(headerfile)); //Need to release locks on 404's too!
 					if(strcasecmp(connection,"close")==0)
 						close(mysocket);
 					free(received_headers);
-					free(bodybuf);
 					return_keep(mysocket);
 					free(headerbuf);
 					return 0; //nonexistent file, return 0, hold on to cache, no datafile exists.
@@ -1068,9 +1064,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					break;
 				} //end switch on http status
 			} //end 'else' clause about whether we have CREST headers or not
+			if(strcasecmp(connection,"close")==0)
+				close(mysocket);
 		} //end if clause as to whether we got a valid response on recv_headers
-		brintf("Past block for receiving data - bytes is: %d, strerror says: %s\n",bodybytes,strerror(errno));
-		free(bodybuf);
+		brintf("Past block for receiving data, strerror says: %s\n",strerror(errno));
 		free(received_headers);
 	} 
 	//if things went remotely well and internet-connectedly, you shouldn't end up here.

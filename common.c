@@ -601,7 +601,7 @@ putting_routine(void *unused __attribute__((unused)))
 				fclose(metafile);
 				continue;
 			}
-			recv_headers(fd,&headerpointer,0);
+			recv_headers(fd,&headerpointer);
 			
 			int status=fetchstatus(headerpointer);
 			
@@ -624,20 +624,28 @@ putting_routine(void *unused __attribute__((unused)))
 				
 
 				//then readback headers, write them to headerfile, 
-				close(fd);
+				//close(fd); //stop that!!!!
+				wastebody("PUT",fd,headerpointer);
 				return_keep(fd);
 				unlink(linkname);//now that we're done, toss the symlink
 				free(headerpointer);
 	
 				//need to invalidate parent directory's cached info (as it shall no longer be valid)
-				append_parents(linktarget+2); //that's the fuse-related path (with leading forward-slash) for the file we just put.
+				//append_parents(linktarget+2); //that's the fuse-related path (with leading forward-slash) for the file we just put.
+				//Wait, wait, wait - I did the 'append-parents' deal already when I created teh file (so that parental directory listsings would work)
+				//so I don't need to do that again, nor do I need to freshen that directory listing - It's fine if it gets refreshed x seconds
+				//after the initial append_parents call, that's fine. Well, not *completely* - what if the file hasn't been put up yet?
+				//that could be an issue. It *should* get put up, but what if it's big and takes longer than x seconds? Could happen!
+				//the short answer is "I dunno" and the longer answer is "When I do all-async-always, it'll be fixed."
+				//FIXME
 				
 				fclose(metafile);//unlock, end transaction
 			} else {
 				brintf("Status isn't in the 200 range I'm expecting: %d\n",status);
 				brintf("Headers for fail are: %s\n",headerpointer);
 				free(headerpointer);
-				close(fd);
+				//close(fd); //goddammit! Stop that rude garbage!
+				wastebody("PUT",fd,headerpointer);
 				return_keep(fd);
 				fclose(metafile);
 			}
@@ -653,70 +661,27 @@ putting_routine(void *unused __attribute__((unused)))
 #include <errno.h>
 
 int 
-recv_headers(int mysocket,char **headerpointer,void **bodypiece)
+recv_headers(int mysocket,char **headerpointer/* ,void **bodypiece */)
 {
-	char *mybuffer=calloc(65535,1);
-	int bytes=0;
-	char *bufpointer=mybuffer;
-	int remainderpiece=-1;
-	
-	//first fetch headers into headerfile, then fetch body into body file
-	//wait,we cant do that. if we're "accelerating" a supposed directory, or we're GET'ing an entity that turns out to be a directory,
-	//we won't want to write the headerfiles here.
-	
-	//also, if this turned out to be a HEAD, we can't write to the data-cachefile
-	while ((bytes = recv(mysocket,bufpointer,65535-(bufpointer-mybuffer),0)) && bufpointer-mybuffer < 65535) {
-		char *headerend=0;
-		//brintf("RECV'ed: %d bytes, into %p\n",bytes,bufpointer);
-		if(bytes==-1 && errno == EAGAIN) {
-			brintf("EAGAIN while receving, retrying\n");
-			continue; //force pulling from cache
-		}
-		if(bytes<=0) {
-			//the EAGAIN option we handled already, above.
-			//otherwise BREAK
-			break;
-		}
-		bufpointer=(bufpointer+bytes);
-		
-		//keep looking for \r\n\r\n in the header we've got...
-		//once we've got that, check status
-		if((headerend = strstr(mybuffer,"\r\n\r\n"))) {
-			//found the end of the headers!
-			//brintf("FOund the end of the headers! this many bytes: %d\n",headerend-mybuffer);
-			headerend+=4;
-
-			if(headerend-mybuffer>=65535) {
-				brintf("Header overflow, I bail.\n");
-				exit(99);
-			}
-			if(headerpointer) {
-				*headerpointer=malloc(headerend-mybuffer+1);
-				strncpy(*headerpointer,mybuffer,headerend-mybuffer);
-				(*headerpointer)[headerend-mybuffer]='\0';
-			}
-			remainderpiece=bufpointer-headerend;
-			brintf("REMAINDER PIECE: %d\n",remainderpiece);
-			if(bodypiece) {
-				if(remainderpiece>0) {
-					//how do we figure out the length of the body piece?
-					//bufpointer is *now* at the end of the chunk of data, so it should be easy!
-					*bodypiece=malloc(remainderpiece);
-					memcpy(*bodypiece,headerend,remainderpiece);
-				} else {
-					*bodypiece=0;
-				}
-			}
-			free(mybuffer);
-			return remainderpiece;
+	int mydesc=dup(mysocket);
+	brintf("My socket is: %d, we duped that to %d. I *PROMISE* to close it, here in-function.\n",mysocket,mydesc);
+	FILE *web=fdopen(mydesc,"r");
+	setvbuf(web,0,_IONBF,0);
+	int bytesofheader=0;
+	*headerpointer=calloc(1,1); //init to \0
+	int i=0;
+	while(i++<100) {
+		char linebuf[1024]="";
+		fgets(linebuf,1024,web);
+		bytesofheader+=strlen(linebuf);
+		brintf("First header line: strlen is %d, header is: %d, line is :%s",strlen(linebuf),bytesofheader,linebuf);
+		*headerpointer=realloc(*headerpointer,bytesofheader+1);
+		strcat(*headerpointer,linebuf);
+		if(strcmp(linebuf,"\r\n")==0) {
+			fclose(web);
+			return 1;
 		}
 	}
-	free(mybuffer);
-	if(headerpointer) {
-		*headerpointer=0;
-	}
-	if(bodypiece) {
-		*bodypiece=0;
-	}
-	return -1;
+	fclose(web);
+	return 0;
 }
