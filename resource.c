@@ -29,7 +29,6 @@
 #include <errno.h>
 #include <stdio.h>
 #include <sys/stat.h>
-#include <regex.h>
 #include <libgen.h> //for 'dirname'
 #include <utime.h>
 
@@ -54,24 +53,13 @@ impossible_file(const char *origpath)
 	strlcpy(path,origpath,1024);
 	strlcat(path,"/",1024); //just to fool the while loop, I know it's ugly, I'm sorry.
 	char *slashloc=(char *)path+1;
-	char *dirbuffer=calloc(DIRBUFFER,1); //DIRBUFFER (1 MB) directory page
-	regex_t re;
 	
 	//first, is file on the upload list? If so, cannot be impossible.
 	if(check_put(origpath)) {
-		free(dirbuffer);
 		return 0; //cannot discount a newly-put file as 'impossible'
 	}
 
 	//brintf("TESTIG FILE IMPOSSIBILITY FOR: %s\n",slashloc);
-	int status=regcomp(&re,DIRREGEX,REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
-	if(status!=0) {
-		char error[80];
-		regerror(status,&re,error,80);
-		brintf("ERROR COMPILING REGEX: %s\n",error);
-		//this is systemic failure, unmount and die.
-		exit(-1);
-	}
 	
 	while((slashloc=strchr(slashloc,'/'))!=0) {
 		char foldbuf[1024];
@@ -104,76 +92,37 @@ impossible_file(const char *origpath)
 		
 		if((metaptr=fopen(metafoldbuf+1,"r"))) {
 			//ok, we opened the metadata for the directory..
-			char headerbuf[65535];
+			char headerbuf[65535]="";
 			struct stat statbuf;
 			
 			fstat(fileno(metaptr),&statbuf);
-			fread(headerbuf,1,65535,metaptr);
+			int hdrlen=fread(headerbuf,1,65535,metaptr);
 			fclose(metaptr);
+			headerbuf[hdrlen+1]='\0';
 			//brintf("Buffer we are checking out is: %s",headerbuf);
 			if(time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) {
 				//okay, the metadata is fresh...
 				//brintf("Metadata is fresh enough!\n");
 				if((dataptr=fopen(dirnamebuf+1,"r"))) {
 					//okay, we managed to open the directory data...
-					int failcounter=0;
 					char foundit=0;
-					regmatch_t rm[3];
-					
-					memset(rm,0,sizeof(rm));
-					fread(dirbuffer,1,DIRBUFFER,dataptr);
-					fclose(dataptr);
-
-					//if(offset<++failcounter) filler(buf,"poople",NULL,failcounter);
-					//return 0; //infinite loop?
-					int weboffset=0;
-					//brintf("Able to look at directory contents, while loop starting...\n");
-					while(status==0 && failcounter < TOOMANYFILES) {
-						failcounter++;
-						char hrefname[255];
-						char linkname[255];
-
-						weboffset+=rm[0].rm_eo;
-						//brintf("Weboffset: %d\n",weboffset);
-						status=regexec(&re,dirbuffer+weboffset,3,rm,0); // ???
-						if(status==0) {
-							reanswer(dirbuffer+weboffset,&rm[1],hrefname,255);
-							reanswer(dirbuffer+weboffset,&rm[2],linkname,255);
-
-							//brintf("Href? %s\n",hrefname);
-							//brintf("Link %s\n",linkname);
-							//brintf("href: %s link: %s\n",hrefname,linkname);
-							if(strcmp(hrefname,linkname)==0) {
-								char slashedname[1024];
-								strlcpy(slashedname,bn,1024);
-								strlcat(slashedname,"/",1024);
-								//brintf("ELEMENT: %s, comparing to %s\n",hrefname,bn);
-								if(strcmp(hrefname,bn)==0 || strcmp(hrefname,slashedname)==0) {
-									//file seems to exist, let's not bother here anymore
-									//brintf("FOUND IT! Moving to next one...\n");
-									foundit=1;
-									break;
-								}
-							}
-						} else {
-							char error[80];
-							regerror(status,&re,error,80);
-							//brintf("Regex status is: %d, error is %s\n",status,error);
+					char filename[1024];
+					directory_iterator iter;
+					init_directory_iterator(&iter,headerbuf,dataptr);
+					while(directory_iterate(&iter,filename,1024,0,0)) {
+						brintf("Comparing %s to %s\n",filename,bn);
+						if(strcmp(filename,bn)==0) {
+							foundit=1;
+							break;
 						}
-						//brintf("staus; %d, 0: %d, 1:%d, 2: %d, href=%s, link=%s\n",status,rm[0].rm_so,rm[1].rm_so,rm[2].rm_so,hrefname,linkname);
-						//filler?
-						//filler(buf,rm[])
 					}
+					free_directory_iterator(&iter);
+					fclose(dataptr);
 					if(foundit==0) {
-						//okay, you walked through a FRESH directory listing, looking at all the files
-						//and did NOT see one of the components you've asked about. So this file is
-						//*IMPOSSIBLE*
-						brintf("The file '%s' seems pretty impossible to me.!\n",origpath);
-						free(dirbuffer);
-						regfree(&re);
+						brintf("The file %s is impossible",origpath);
 						return 1;
 					}
-					
+					brintf("The file %s doesn't seem impossible by %s",origpath,bn);	
 				} else {
 					//brintf("Can't open directory contents file.\n");
 				}
@@ -187,8 +136,6 @@ impossible_file(const char *origpath)
 		slashloc+=1;//iterate past the slash we're on
 	}
 	//brintf("File '%s' appears not to be impossible, move along...\n",origpath);
-	free(dirbuffer);
-	regfree(&re);
 	return 0; //must not be impossible, or we would've returned previously
 }
 
@@ -407,7 +354,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		strlcat(extraheadersbuf,authstring,16384);
 		strlcat(extraheadersbuf,"\r\n",16384);
 	}
-	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/0.8\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,extraheadersbuf);
+	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/1.0\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,extraheadersbuf);
 	brintf("REQUEST: %s\n",reqstr);
 	int sendresults=send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
@@ -573,7 +520,15 @@ chunked_handler(int fdesc,FILE *datafile)
 void
 wastebody(char *selectedverb,int mysocket,char *received_headers)
 {
-	if(strncasecmp(selectedverb,"GET",4)==0 || strncasecmp(selectedverb,"POST",5)==0) {
+	if(strcasecmp(selectedverb,"HEAD")==0) {
+		//All responses to the HEAD Method MUST NOT include a message body...
+		return;
+	}
+	int httpstatus=fetchstatus(received_headers);
+	if((httpstatus>=100 && httpstatus <200) || httpstatus==204 || httpstatus==304) {
+		//All 1xx, 204, and 304 responses MUST NOT include a message-body..
+		return;
+	} else {
 		FILE *waster=fopen("/dev/null","w");
 		char transferencoding[1024];
 		fetchheader(received_headers,"transfer-encoding",transferencoding,1024);
@@ -584,73 +539,68 @@ wastebody(char *selectedverb,int mysocket,char *received_headers)
 			fetchheader(received_headers,"content-length",contentlength,1024);
 			straight_handler(strtol(contentlength,0,10),mysocket,waster);
 		}
+		fclose(waster);
 	}
 }
-/*
-int
-chunked_handler(char chunk_size[11],void *data,int length,FILE *fp)
+
+#include <utime.h>
+#include <sys/stat.h>
+
+void directory_freshen(const char *path,char *headers,FILE *dirfile)
 {
-	void *currentptr=data;
-	int bytesleft=length;
-	brintf("Beginning chunked_handler! Initial chunk_size: %s, length of bytes to process is: %d (First byte is '%c')",chunk_size,length,((char *)data)[0]);
-	while(strcmp(chunk_size,"0")!=0 && bytesleft>0) {
-		brintf("Current chunksize: %s, bytesleft: %d, running loop...\n",chunk_size,bytesleft);
-		if(strstr(chunk_size,"\r\n")==0) {
-			//chunk discovery mode!!!
-			//either we didn't read all the way through the carriage return, or we're manually put into discovery mode
-			//or we're just starting up
-			//get up to the 'carriage return' (\n)
-			brintf("chunk discovery mode\n");
-			void *endline=memchr(currentptr,'\n',bytesleft); //cheating and assuming it's \r\n! naughty...
-			if(endline==0) {
-				brintf("CHUNK NO END! Taking end as end of bytes, and hopefully appending to it later?!?\n");
-				endline=currentptr+bytesleft;
+	char contenttype[1024];
+	
+	fetchheader(headers,"content-type",contenttype,1024);
+	
+	if(strcasecmp(contenttype,"x-vnd.bespin.corp/directory-manifest")==0) {
+		brintf("RECEIVED MANIFEST - MANIPULATING CACHED ITEMS!\n");
+		
+		directory_iterator iter;
+		char etag[128];
+		char filename[1024];
+		char headerbuf[8192]="";
+		char fileetag[1024];
+		struct utimbuf stamp;
+		init_directory_iterator(&iter,headers,dirfile);
+		while(directory_iterate(&iter,filename,1024,etag,128)) {
+			char direlem[2048];
+			snprintf(direlem,2048,"%s%s/%s" ,METAPREPEND,path,filename);
+			if(direlem[strlen(direlem)-1]=='/') {
+				direlem[strlen(direlem)-1]='\0';
+				strncat(direlem,DIRCACHEFILE,2048); //already has a slash in front of it...GRRR
 			}
-			int bytesused=(endline-currentptr)+1; //increment past end-of-line...
-			if(bytesused>10) { //8 hex characters plus \r\n
-				brintf("BAD (big?) CHUNK RECEIVED. EXITING FOR NOW!");
-				exit(53);
-			}
-			strlcat(chunk_size,currentptr,bytesused);
-			chunk_size[bytesused+1]='\0';
-			brintf("Chunk found: width: %d, alleged value: '%s'\n",bytesused,chunk_size);
-			//now move past the trailing \r\n at the end of the previous line
-			bytesused+=2;
-			currentptr+=bytesused;
-			bytesleft-=bytesused;
-			continue;
-		} else {
-			int bytestowrite;
-			int chunkbytes=strtoul(chunk_size,0,16);
-			if(chunkbytes> bytesleft) {
-				brintf("More bytes left in chunk than there are in stream, just writing %d (bytesleft)\n",bytesleft);
-				bytestowrite=bytesleft;
+			FILE *metafile=fopen(direlem+1,"r"); //lock your damned self you ingrate
+			brintf("I would like to open: %s, please? Results: %p\n",direlem+1,metafile);
+			if(metafile) {
+				int hbytes=fread(headerbuf,1,8192,metafile);
+				headerbuf[hbytes+1]='\0';
+				fclose(metafile);
+				fetchheader(headerbuf,"etag",fileetag,1024);
+				struct stat oldtime;
+				stat(direlem+1,&oldtime);
+				stamp.actime=oldtime.st_atime; //always leave atimes alone! This says nothing about 'access'!
+				if(strcmp(etag,fileetag)==0) {
+					stamp.modtime=time(0); //NOW!
+					brintf("%s UTIMING NEW!\n",filename);
+					utime(direlem+1,&stamp); //Match! So this file is GOOD as of right now!
+				} else {
+					stamp.modtime=0; //EPOCH! LONG TIME AGO!
+					brintf("%s UTIMING OLD!\n",filename);
+					utime(direlem+1,&stamp); //unmatch! This file is BAD as of right now, set its time BACK!
+				}
 			} else {
-				brintf("More bytes in stream than there are in chunk, just read to end of chunk: %d (*chunk_size)\n",chunkbytes);
-				bytestowrite=chunkbytes;
+				brintf("NO METAFILE I COULD OPEN FOR %s - doing *NOTHING!!!*\n",direlem+1);
 			}
-			chunkbytes-=bytestowrite;
-			bytesleft-=bytestowrite;
-			fwrite(currentptr,1,bytestowrite,fp);
-			currentptr+=bytestowrite;
-			if(bytestowrite>0 && bytesleft>0 && chunkbytes ==0) {
-				//#1) We wrote some bytes, #2) there are more bytes left to read from, #3) chunk_bytes remaining is zero (we just finished a chunk)
-				// so this means we go back to chunk discovery mode
-				chunk_size[0]='\0'; 
-			} else {
-				//sorry, mom.
-				snprintf(chunk_size,11,"%x\r\n",chunkbytes);
-			}
+			//check etag for that file.
+			//if it MATCHES, touch the file
+			//otherwise, UNTOUCH the file
+			//the 'file' may be a directory
 		}
-	}
-	brintf("While loop finished. Current chunk_size: %s, current bytesleft: %d\n",chunk_size,bytesleft);
-	if(strcmp(chunk_size,"0")==0) {
-		return 0; //finito!
-	} else {
-		return 1; //caller's responsibility to figure out how many more bytes they've got...?
+		//rewind(dirfile); //doesn't 'free' do this on its own?
+		free_directory_iterator(&iter);
 	}
 }
-*/
+
 FILE *
 get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode)
 {
@@ -746,7 +696,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		flock(fileno(headerfile),LOCK_SH);
 		s=stat(headerfilename,&statbuf); //assume infallible
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
-		fread(headerbuf,1,65535,headerfile);
+		int hdrbytesread=fread(headerbuf,1,65535,headerfile);
+		headerbuf[hdrbytesread+1]='\0';
 		//brintf("Headers from cache are: %s, statresults is: %d\n",headerbuf,s);
 		if(!dontuseetags) {
 			//only time we DONT want to use etags is if the original cache entity (the data file)
@@ -824,7 +775,11 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	//either there is no cachefile for the headers, or it's too old.
 	//the weird thing is, we have to be prepared to return our (possibly-outdated) cache, if we can't get on the internet
 	
-	mysocket=http_request(webresource,selectedverb,etag,purpose,0,0);
+	char acceptheader[80]="";
+	if(dirmode) {
+		strcpy(acceptheader,"Accept: x-vnd.bespin.corp/directory-manifest, */*; q=0.5");
+	}
+	mysocket=http_request(webresource,selectedverb,etag,purpose,acceptheader,0); //extraheaders? (first param)
 	
 	//brintf("Http request returned socket: %d\n",mysocket);
 	
@@ -852,9 +807,24 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				brintf("FAST 304 Etags METHOD! Not touching much (just utimes)\n");
 				utime(headerfilename,0);
 				if(headers && headerlength>0 ) {
-					strlcpy(headers,received_headers,headerlength);
+					//So - why do we do this? Why not use the on-file headers instead?
+					strlcpy(headers,headerbuf,headerlength);
 				}
-				datafile=fopen(cachefilebase,cachefilemode); //use EXISTING basefile...
+				if(fetchstatus(headerbuf)==200) {
+					brintf("Original file was a file, gonna fopen the datafile\n");
+					//this can be problematic if we were a symlink
+					
+					datafile=fopen(cachefilebase,cachefilemode); //use EXISTING basefile...
+					brintf("FOPENED!\n");
+				} else {
+					datafile=0; //this could've been a symlink, don't try to open it
+				}
+				if(dirmode) {
+					brintf("WE ARE IN DIRMODE - GOING TO TRY TO FRESHEN!\n");
+					brintf("(HEADERBUF SEZ: %s)\n",headerbuf);
+					directory_freshen(path,headerbuf,datafile);
+				}
+				brintf("Bout to fclose\n");
 				fclose(headerfile); // RELEASE LOCK
 				free(received_headers);
 				if(strcasecmp(connection,"close")==0)
@@ -863,6 +833,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				return_keep(mysocket);
 				if(strcasecmp(connection,"close")==0)
 					close(mysocket);
+				brintf("Ready to return..\n");
 				return datafile;
 			}
 
@@ -959,6 +930,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						brintf("Failed to reopen datafile?!: %s\n",strerror(errno));
 					}
 					rewind(datafile);
+					if(dirmode) {
+						brintf("DIRMODE - FRSHEN!\n");
+						directory_freshen(path,received_headers,datafile);
+					}
 					fclose(headerfile); //RELEASE LOCK
 					free(received_headers);
 					if(strcasecmp(connection,"close")==0)

@@ -10,13 +10,25 @@ GET /path/to/folder is also used to retrieve directory contents, if 'folder' is 
 
 GET /path/to/folder/ <-- notice the trailing slash
 
+The contents of the folder can be described in an HTML-esque style or a
+custom format called 'directory manifest'.
 
-
-Folder contents don't have to be in HTML, but resources within need to be described as follows:
+HTML-esque style folder contents don't have to be in HTML, but resources within need to be described as follows:
 
 <a href='resource'>resource</a>
 
 Note that the 'href' attribute and the resource name are identical. "Links" where they are _not_ identical will not be counted as resources.
+
+Directory manifest will be described with a MIME-type of:
+
+x-vnd.bespin.corp/directory-manifest
+
+The contents of which will be:
+
+memberetag membername
+
+Trailing slashes are required for subdirectories.
+
 
 
 HTTP Redirects will be interpreted as 'symlinks'.

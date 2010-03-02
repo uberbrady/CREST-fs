@@ -16,8 +16,6 @@
 
 #include <dirent.h>
 
-#include <regex.h>
-
 #define FUSE_USE_VERSION  26
 #include <fuse.h>
 #include <sys/time.h>
@@ -48,64 +46,6 @@ int maxcacheage=-1;
 #define METALEN 1024
 
 #define HEADERLEN 65535
-
-typedef struct {
-	regex_t re;
-	regmatch_t rm[3];
-	int filecounter;
-	int weboffset;
-} iterator;
-
-/**** DIRECTORY ITERATOR HELPERS ****/
-
-//THESE ARE NOT YET IN USE!!!!
-// But they should be used in 2, probably 3 places:
-//	crest_readdir should use a while loop that runs through this function to spit out successive directory entries
-//	The impossible-file-detection routine should loop through this function to see if it finds the file its looking for (or not)
-//	And get_resource should use it instead of just lstat()'ing its cachefile to see if it can 'hint' as to what's a directory or not
-//		(hint: if it ends in a slash, assume it's a directory!)
-
-void
-init_directory_iterator(iterator *iter)
-{
-	memset(iter,0,sizeof(iter));
-	int status=regcomp(&iter->re,DIRREGEX,REG_EXTENDED|REG_ICASE);
-	if(status!=0) {
-		char error[80];
-		regerror(status,&iter->re,error,80);
-		brintf("ERROR COMPILING REGEX: %s\n",error);
-		exit(98);
-	}
-}
-
-int
-directory_iterator(char *directoryfile,iterator *iter,char *buf,int buflen)
-{
-	char hrefname[255];
-	char linkname[255];
-	int status=0;
-
-	//brintf("Weboffset: %d\n",iter->weboffset);
-	while(regexec(&iter->re,directoryfile+iter->weboffset,3,iter->rm,0)==0) {
-		reanswer(directoryfile+iter->weboffset,&iter->rm[1],hrefname,255);
-		reanswer(directoryfile+iter->weboffset,&iter->rm[2],linkname,255);
-		iter->weboffset+=iter->rm[0].rm_eo;
-
-		//brintf("href: %s link: %s\n",hrefname,linkname);
-		if(strcmp(hrefname,linkname)==0) {
-			iter->filecounter++;
-			//brintf("ELEMENT: %s\n",hrefname);
-			strlcpy(buf,hrefname,buflen);
-			return 1;
-		}
-	}
-	if(status!=0) {
-		char error[80];
-		regerror(status,&iter->re,error,80);
-		brintf("Regex status is: %d, error is %s\n",status,error);
-	}
-	return 0;
-}
 
 static int
 crest_getattr(const char *path, struct stat *stbuf)
@@ -146,12 +86,16 @@ crest_getattr(const char *path, struct stat *stbuf)
 
 				brintf("Status: %d on path %s, Header: %s\n",httpstatus,path,header);
 				switch(httpstatus) {
+					case 304:
+					brintf("ERROR - we should never be 'exposed' to a 304 header\n");
+					exit(33);
+					break;
+					
 					case 200:
 					case 201:
 					case 204:
-					case 304:
 					//brintf("It is a file\n");
-					stbuf->st_mode = S_IFREG | 0755;
+					stbuf->st_mode = S_IFREG | 0700;
 					//brintf("Pre-mangulation headers: %s\n",header);
 					fetchheader(header,"last-modified",date,80);
 					fetchheader(header,"content-length",length,80);
@@ -226,7 +170,7 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 {
 	//we'll start with the assumption this actuallly IS a symlink.
 	char location[4096]="";
-	char header[HEADERLEN];
+	char header[HEADERLEN]="";
 	FILE *cachefile;
 	int is_directory=-1;
 	
@@ -276,8 +220,6 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
 	return 0;
 }
-
-#include "common.h"
 
 static int
 crest_open(const char *path, struct fuse_file_info *fi)
@@ -363,85 +305,86 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		return 0;
 	}
 
-	char *dirbuffer=calloc(DIRBUFFER,1);
-	if(dirbuffer==0) {
-		brintf("Great, can't malloc our dirbuffer. baililng.\n");
-		exit(19);
-	}
-	dirbuffer[0]='\0';
-	
-	regex_t re;
-	regmatch_t rm[3];
-	
-	memset(rm,0,sizeof(rm));
-	
-	dirfile=get_resource(path,0,0,&is_directory,"GET","readdir","r");
+	char headers[8192];
+	dirfile=get_resource(path,headers,8192,&is_directory,"GET","readdir","r");
 	if(!is_directory) {
 		if(dirfile) {
 			fclose(dirfile);
 		}
-		free(dirbuffer);
 		return -ENOTDIR;
 	}
 	if(dirfile==0) {
 		//got no directory listing file, this directory doesn't even exist.
-		free(dirbuffer);
 		return -ENOENT;
 	}
-
-	fread(dirbuffer,1,DIRBUFFER,dirfile);
-	fclose(dirfile);
-
-	int status=regcomp(&re,DIRREGEX,REG_EXTENDED|REG_ICASE); //this can be globalized for performance I think.
-	if(status!=0) {
-		char error[80];
-		regerror(status,&re,error,80);
-		brintf("ERROR COMPILING REGEX: %s\n",error);
-		//this is systemic failure, unmount and die.
-		exit(-1);
-	}
+	
+	directory_iterator it;
+	char filename[1024];
+	init_directory_iterator(&it,headers,dirfile);
 	int failcounter=0;
 	if(offset<++failcounter) filler(buf, ".", NULL, failcounter); /* Current directory (.)  */
 	if(offset<++failcounter) filler(buf, "..", NULL, failcounter);          /* Parent directory (..)  */
-	//if(offset<++failcounter) filler(buf,"poople",NULL,failcounter);
-	//return 0; //infinite loop?
-	int weboffset=0;
-	while(status==0 && failcounter < TOOMANYFILES) {
+	while(directory_iterate(&it,filename,1024,0,0)) {
 		failcounter++;
-		char hrefname[255];
-		char linkname[255];
-		
-		weboffset+=rm[0].rm_eo;
-		//brintf("Weboffset: %d\n",weboffset);
-		status=regexec(&re,dirbuffer+weboffset,3,rm,0); // ???
-		if(status==0) {
-			reanswer(dirbuffer+weboffset,&rm[1],hrefname,255);
-			reanswer(dirbuffer+weboffset,&rm[2],linkname,255);
-
-			//brintf("Href? %s\n",hrefname);
-			//brintf("Link %s\n",linkname);
-			//brintf("href: %s link: %s\n",hrefname,linkname);
-			if(strcmp(hrefname,linkname)==0) {
-				//brintf("ELEMENT: %s\n",hrefname);
-				if(offset<failcounter) 
-					if(filler(buf, hrefname, NULL, failcounter)!=0) {
-						brintf("Filler said not zero.\n");
-						break;
-					}
+		brintf("Returned filename IS: %s - ",filename);
+		if(offset<failcounter) {
+			if(filler(buf, filename, NULL, failcounter)!=0) {
+				brintf("Filler said not zero.\n");
+				break;
+			} else {
+				brintf("OK\n");
 			}
+		} else {
+			brintf("Less than offset %d, so ignoring\n",(int)offset);
 		}
-		//brintf("staus; %d, 0: %d, 1:%d, 2: %d, href=%s, link=%s\n",status,rm[0].rm_so,rm[1].rm_so,rm[2].rm_so,hrefname,linkname);
-		//filler?
-		//filler(buf,rm[])
 	}
-	//brintf("while loop - complete\n");
-	if(failcounter>=TOOMANYFILES) {
-		brintf("Fail due to toomany\n");
-	}
-	free(dirbuffer);
-	regfree(&re);
-	return 0; //success? or does that mean fail?
+	free_directory_iterator(&it);
+	fclose(dirfile);
+	return 0;
 }
+
+
+#if 0
+			
+			while(status==0 && failcounter < TOOMANYFILES) {
+				failcounter++;
+				char hrefname[255];
+				char linkname[255];
+				
+				weboffset+=rm[0].rm_eo;
+				//brintf("Weboffset: %d\n",weboffset);
+				status=regexec(&re,dirbuffer+weboffset,3,rm,0); // ???
+				if(status==0) {
+					reanswer(dirbuffer+weboffset,&rm[1],hrefname,255);
+					reanswer(dirbuffer+weboffset,&rm[2],linkname,255);
+
+					//brintf("Href? %s\n",hrefname);
+					//brintf("Link %s\n",linkname);
+					//brintf("href: %s link: %s\n",hrefname,linkname);
+					if(strcmp(hrefname,linkname)==0) {
+						//brintf("ELEMENT: %s\n",hrefname);
+						if(offset<failcounter) 
+							if(filler(buf, hrefname, NULL, failcounter)!=0) {
+								brintf("Filler said not zero.\n");
+								break;
+							}
+					}
+				}
+				//brintf("staus; %d, 0: %d, 1:%d, 2: %d, href=%s, link=%s\n",status,rm[0].rm_so,rm[1].rm_so,rm[2].rm_so,hrefname,linkname);
+				//filler?
+				//filler(buf,rm[])
+			}
+			//brintf("while loop - complete\n");
+			if(failcounter>=TOOMANYFILES) {
+				brintf("Fail due to toomany\n");
+			}
+			free(dirbuffer);
+			regfree(&re);
+			return 0; //success? or does that mean fail?
+		}
+	}
+
+#endif 
 
 #define FILEMAX 64*1024*1024
 
@@ -597,6 +540,30 @@ crest_mknod(const char*path,mode_t m, dev_t d __attribute__((unused)))
 }
 
 static int
+crest_unlink(const char *path)
+{
+	//unlink path+1
+	int pointless=http_request(path,"DELETE",0,"unlink",0,0);
+	char *resultheaders=0;
+	recv_headers(pointless,&resultheaders);
+	wastebody("DELETE",pointless,resultheaders);
+
+	return_keep(pointless);
+	if(resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) <300) {
+		char metapath[1024];
+		strlcpy(metapath,METAPREPEND,1024);
+		strlcat(metapath,path,1024);
+	
+		invalidate_parents(path);
+		free(resultheaders);
+		return 0;
+	} else {
+		brintf("FALIURE Unlinking: %s\n",resultheaders);
+		return -EIO;
+	}
+}
+
+static int
 crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 {
 	//THIS SHOULD BE DONE ASYNC INSTEAD! THIS IS WRONG! WILL NOT WORK DISCONNECTEDLY!!!!!!!
@@ -701,6 +668,8 @@ static struct fuse_operations crest_filesystem_operations = {
     .chmod = crest_chmod,     //do-nothings
     .chown = crest_chown,     //ditto
     .utime = crest_utime,     //same-a-rino
+    
+    .unlink = crest_unlink,
 /*
     .mkdir = PUT (fuck MKCOL. fuck DAV. PUT with a slash at the end. M'k?)
     .unlink = (delete?)
@@ -762,7 +731,7 @@ void strtest()
 
 void pretest()
 {
-	char buf[DIRBUFFER];
+	char buf[1024*1024*1024];
 /*	pathtest("/desk.nu");
 	pathtest("/desk.nu/pooh.html");
 	pathtest("/desk.nu/braydix");

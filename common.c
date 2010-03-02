@@ -607,17 +607,28 @@ putting_routine(void *unused __attribute__((unused)))
 			
 			if(status==200 || status==201 || status==204) {
 				char etag[1024]="";
-				char sanitized_headers[1024]="";
+				char sanitized_headers[8192]="";
 				ftruncate(fileno(metafile),0);
 				brintf("RECEIVED HEADERS SAY: %s\n",headerpointer);
 				fetchheader(headerpointer,"etag",etag,1024);
-				snprintf(sanitized_headers,1024,"HTTP/1.0 %d Synthetic Header\r\n",fetchstatus(headerpointer));
+				snprintf(sanitized_headers,8192,"HTTP/1.0 %d Synthetic Header\r\n",fetchstatus(headerpointer));
 				if(strlen(etag)>0) { 
-					strlcat(sanitized_headers,"Etag: ",1024);
-					strlcat(sanitized_headers,etag,1024);
-					strlcat(sanitized_headers,"\r\n",1024);
+					strlcat(sanitized_headers,"Etag: ",8192);
+					strlcat(sanitized_headers,etag,8192);
+					strlcat(sanitized_headers,"\r\n",8192);
 				}
-				strlcat(sanitized_headers,"\r\n",1024);
+				
+				strlcat(sanitized_headers,"Last-Modified: ",8192);
+				char httpdate[80];
+				struct tm now;
+				time_t nowtime;
+				nowtime=time(0);
+				localtime_r(&nowtime,&now);
+				strftime(httpdate,80,"%a %e %b %Y %H:%M:%S %Z",&now);
+				strlcat(sanitized_headers, httpdate, 8192);
+				strlcat(sanitized_headers,"\r\n",8192);
+				
+				strlcat(sanitized_headers,"\r\n",8192);
 				fputs(sanitized_headers,metafile);
 				fputc('\0',metafile);
 				//fputs(headerpointer,metafile);
@@ -684,4 +695,141 @@ recv_headers(int mysocket,char **headerpointer/* ,void **bodypiece */)
 	}
 	fclose(web);
 	return 0;
+}
+
+// DIRECTORY HELPER FUNCTIONS
+
+/**** DIRECTORY ITERATOR HELPERS ****/
+
+#define DIRBUFFER	1*1024*1024
+// 1 MB
+#define DIRREGEX	"<a[^>]href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>"
+
+static regex_t re;
+static int initted=0;
+
+void
+init_directory_iterator(directory_iterator *iter,const char *headers, FILE *fp) //char *?
+{
+	brintf("Initializing directory iterator\n");
+	if(!initted) {
+		int status=regcomp(&re,DIRREGEX,REG_EXTENDED|REG_ICASE);
+		if(status!=0) {
+			char error[80];
+			regerror(status,&re,error,80);
+			brintf("ERROR COMPILING REGEX: %s\n",error);
+			exit(98);
+		}
+		initted=1;
+	}
+	memset(iter,0,sizeof(iter));
+	iter->mode=unknown;
+	
+	if(fp==0) {
+		brintf("FAIL URE - I cannot iterate on 'empty!'\n");
+		exit(62);
+	}
+	char contenttype[1024]="";
+	brintf("Mine Headers arE: %s",headers);
+	fetchheader((char *)headers,"content-type",contenttype,1024);
+	if(strcasecmp(contenttype,"x-vnd.bespin.corp/directory-manifest")==0) {
+		iter->mode=manifest;
+		iter->iterator.manifestmode.fptr=fp; //be kind, rewind
+	} else {
+		iter->mode=html;
+		iter->iterator.htmlmode.directory_buffer=calloc(DIRBUFFER,1);
+		if(iter->iterator.htmlmode.directory_buffer==0) {
+			brintf("Great, can't malloc our dirbuffer. baililng.\n");
+			exit(19);
+		}
+		iter->iterator.htmlmode.directory_buffer[0]='\0';
+		fread(iter->iterator.htmlmode.directory_buffer,1,DIRBUFFER,fp);
+		rewind(fp);
+		
+		memset(&(iter->iterator.htmlmode.rm),0,sizeof(iter->iterator.htmlmode.rm));
+		iter->iterator.htmlmode.weboffset=0;
+	}
+}
+
+int
+directory_iterate(directory_iterator *metaiter,char *buf,int buflen,char *etagbuf,int etaglen)
+{
+	brintf("ITERATE!\n");
+	char hrefname[255];
+	char linkname[255];
+	char *directory=0;
+	char etag[128];
+	char filename[1024];
+	switch(metaiter->mode) {
+		case unknown:
+		brintf("Unknown file type (or uninitted directory_iterator?)\n");
+		return 0;
+		break;
+		
+		case html:
+		if(etagbuf!=0 && etaglen!=0) {
+			etagbuf[0]='\0'; //no etags in htmlmode, sorry
+		}
+
+		//brintf("Weboffset: %d\n",iter->weboffset);
+		directory=metaiter->iterator.htmlmode.directory_buffer;
+		while(regexec(&re,directory+metaiter->iterator.htmlmode.weboffset,3,metaiter->iterator.htmlmode.rm,0)==0) {
+			reanswer(directory+metaiter->iterator.htmlmode.weboffset,&metaiter->iterator.htmlmode.rm[1],hrefname,255);
+			reanswer(directory+metaiter->iterator.htmlmode.weboffset,&metaiter->iterator.htmlmode.rm[2],linkname,255);
+			metaiter->iterator.htmlmode.weboffset+=metaiter->iterator.htmlmode.rm[0].rm_eo;
+
+			//brintf("href: %s link: %s\n",hrefname,linkname);
+			if(strcmp(hrefname,linkname)==0) {
+				metaiter->iterator.htmlmode.filecounter++;
+				//brintf("ELEMENT: %s\n",hrefname);
+				strlcpy(buf,hrefname,buflen);
+				return 1;
+			}
+		}
+		return 0;
+		break;
+		
+		case manifest:
+		//just read another line, split it off, and you're good.
+		//hell, the algorithm may be in use somewhere already
+		while(fscanf(metaiter->iterator.manifestmode.fptr,"%128s %1024[^\r\n]",etag,filename) != EOF) {
+			brintf("ETAG: %s for filename: %s\n",etag,filename);
+			strlcpy(buf,filename,buflen);
+			
+			if(etagbuf!=0 && etaglen!=0) {
+				strlcpy(etagbuf,etag,etaglen);
+			}
+			return 1;
+		}
+		return 0;
+		break;
+		
+		default:
+		return 0;
+		break;
+	}
+}
+
+void free_directory_iterator(directory_iterator *iter)
+{
+	brintf("FREEING directory iterator!\n");
+	switch(iter->mode) {
+		case unknown:
+		break;
+		
+		case html:
+		free(iter->iterator.htmlmode.directory_buffer);
+		break;
+		
+		case manifest:
+		if(iter->iterator.manifestmode.fptr) {
+			rewind(iter->iterator.manifestmode.fptr);
+		} else {
+			brintf("Manifest file pointer is empty - that's WEIRD!\n");
+		}
+		break;
+		
+		default:
+		break;
+	}
 }

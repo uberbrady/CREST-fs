@@ -16,19 +16,11 @@ void redirmake(const char *path);
 
 FILE *fopenr(char *filename,char*mode);
 
-#define DIRBUFFER	1*1024*1024
-// 1 MB
-#define DIRREGEX	"<a[^>]href=['\"]([^'\"]+)['\"][^>]*>([^<]+)</a>"
-
 extern int maxcacheage;
 
 extern char authfile[256];
 
 #define TOOMANYFILES 1000
-
-#include <regex.h>
-
-void reanswer(char *string,regmatch_t *re,char *buffer,int length);
 
 int recv_headers(int fd,char **headerpointer); //http-related? 
 //ALLOCATES headerpointer (fills it), and allocates and fills bodypiece and returns its size
@@ -59,3 +51,38 @@ void append_parents(const char *path); //definitely cache related (similar to ab
 void faux_freshen_metadata(const char *path); //cache-related, also resource? 
 
 void *putting_routine(void *unused); //no clue where this should go. maybe crestfs?
+
+// DIRECTORY ITERATION HELPERS
+
+#include <regex.h>
+
+typedef struct {
+	char *directory_buffer;
+	regmatch_t rm[3];
+	int filecounter;
+	int weboffset;
+} html_iterator;
+
+typedef struct {
+	FILE *fptr;
+} manifest_iterator;
+
+typedef union {
+	html_iterator htmlmode;
+	manifest_iterator manifestmode;
+} mode_union;
+
+typedef enum {
+	unknown=0,
+	html,
+	manifest
+} mode_switch;
+
+typedef struct {
+	mode_switch mode;
+	mode_union iterator;
+} directory_iterator;
+
+void init_directory_iterator(directory_iterator *iter,const char *headers,FILE *fp);
+int directory_iterate(directory_iterator *iter,char *filename,int filenamelen,char *etag, int etaglen);
+void free_directory_iterator(directory_iterator *iter); //doesn't close the file pointer you opened it, you close it godadmit!

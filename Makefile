@@ -2,6 +2,8 @@
 
 #gcc=/root/buildroot-2009.05/build_i686/staging_dir/usr/i686-linux/bin/gcc
 
+#PATH=/http/fs.lightdesktop.com/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/:/usr/bin/:/bin/:/sbin:/usr/sbin
+
 PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/:/usr/bin/:/bin/:/sbin:/usr/sbin
 
 gcc=i686-linux-uclibc-gcc
