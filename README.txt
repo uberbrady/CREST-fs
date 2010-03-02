@@ -39,10 +39,11 @@ Hey, I don't want The Whole Web, I just want *my* server. (server.com/sampledir/
 	ln -s mymountpoint/server.com/sampledir/ justmyserver # to have a 'justmyserver' "directory" which points to your server's directory
 	
 What features does it have?
-	(NEW) HTTP Basic authentication to a 'root' domain. This will eventually lead to read/write access to files.
-	(NEW) Threading support is in and seems to work OK.
+	(NEW) Directory Manifest support speeds access to all files
+	(NEW) Read-write access to a personal subtree of the filesystem.
 	(NEW) Cache-time is mount-time configurable with a command-line option - the amount of time that a resource will *always* be considered 'fresh' for, without requesting the resource from the web again. Interesting values for this are 60 as a reasonable default, and 2^31-1 (2147483647) as a near 'infinite' value (which means resources will only be grabbed once, then never requested again. Well, not for 1600 years, at least.).
-	(NEW) User-Agent header is now "CREST-fs/0.7", a big bump in version since some significant changes affect how the system works now.
+	(NEW) User-Agent header is now "CREST-fs/1.0"
+	Threading support is in and seems to work OK.
 	Anti-HotSpot pollution - since you're treating REST resources from the Web as actual files, when you go into a Starbucks and use their Wifi, every page you ask for gives you a redirect to a login page. Those redirects would normally be parsed as symlinks and could completely destroy your filesystem. Now, all filesystem-level 200's, 404's and 30x-series redirects require a special header to be set - "X-Bespin-Crest:" - it can be set to anything for now (the production server uses the word 'yes'), but will eventually be some kind of digital signature. This unfortunately makes using a stock Apache install far more difficult than it should be.
 	HTTP/1.1 pipelining support is built and has improved performance dramatically.
 	
