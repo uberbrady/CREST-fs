@@ -343,7 +343,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 	} else {
 		extraheadersbuf[0]='\0';
 	}
-	if(extraheaders) {
+	if(extraheaders && strlen(extraheaders)>0) {
 		strlcat(extraheadersbuf,extraheaders,16384);
 		strlcat(extraheadersbuf,"\r\n",16384);
 	}
