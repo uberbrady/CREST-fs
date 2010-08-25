@@ -88,7 +88,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 				switch(httpstatus) {
 					case 304:
 					brintf("ERROR - we should never be 'exposed' to a 304 header\n");
-					exit(33);
+					exit(33); //fundamental structure of space and time has been distorted. I don't want to live in this world.
 					break;
 					
 					case 200:
@@ -105,13 +105,12 @@ crest_getattr(const char *path, struct stat *stbuf)
 					} else {
 						if(!cachefile) {
 							brintf("WEIRD! No cachefile given on a %d, and couldn't find content-length!!! Let's see if there's anything interesting in errno: %s\n",httpstatus,strerror(errno));
-							//exit(57);
 							stbuf->st_size=0;
 						} else {
 							int seeker=fseek(cachefile,0,SEEK_END);
 							if(seeker) {
 								brintf("Can't seek to end of file! WTF!\n");
-								exit(88);
+								exit(88); //Errr....yeah, all bets are off if taht happens
 							}
 							stbuf->st_size= ftell(cachefile);
 						}
@@ -206,7 +205,7 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 		int linklen=readlink(path+1,linkbuf,1024);
 		if(linklen>1023) {
 			brintf("Too long of a link :(\n");
-			exit(54);
+			exit(54); //buffer overflow
 		}
 		linkbuf[linklen+1]='\0';
 		if(stres==0 && strncmp(linkbuf,buf,1024)==0) {
@@ -215,8 +214,8 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 		}
 	}
 	brintf("I will unlink: %s, and point it to: %s\n",path+1,buf);
-	int unlinkstat=unlink(path+1);
-	int linkstat=symlink(buf,path+1);
+	int unlinkstat=unlink(path+1); (void)unlinkstat;
+	int linkstat=symlink(buf,path+1); (void)linkstat;
 	brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
 	return 0;
 }
@@ -250,7 +249,7 @@ crest_open(const char *path, struct fuse_file_info *fi)
 		return -ENOENT;
 	}
 	if(rsrc) {
-		//brintf("Going to set filehandle to POINTER: %p\n",rsrc);
+		brintf("Going to set filehandle to POINTER: %p\n",rsrc);
 		fi->fh=(long int)rsrc;
 		return 0;
 	} else {
@@ -261,7 +260,7 @@ crest_open(const char *path, struct fuse_file_info *fi)
 }
 
 static int
-crest_release(const char *path, struct fuse_file_info *fi)
+crest_release(const char *path __attribute__ ((unused)), struct fuse_file_info *fi)
 {
 	brintf("Closing filehandle %p: for file: %s\n",(FILE *)(unsigned int)fi->fh,path);
 	if(fi->fh) {
@@ -307,6 +306,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 	char headers[8192];
 	dirfile=get_resource(path,headers,8192,&is_directory,"GET","readdir","r");
+	brintf("Just fetched the resource for this directory you're reading, just FYI.");
 	if(!is_directory) {
 		if(dirfile) {
 			fclose(dirfile);
@@ -389,7 +389,7 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 #define FILEMAX 64*1024*1024
 
 static int
-crest_read(const char *path, char *buf, size_t size, off_t offset,
+crest_read(const char *path __attribute__ ((unused)), char *buf, size_t size, off_t offset,
            struct fuse_file_info *fi)
 {
 	FILE *cachefile;
@@ -420,6 +420,7 @@ crest_read(const char *path, char *buf, size_t size, off_t offset,
 static int
 crest_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
+	brintf("I'm going tow rite noe\n");
 	if(!fi) {
 		brintf("File Info is ZERO for path: %s\n",path);
 		return -EIO;
@@ -431,13 +432,17 @@ crest_write(const char *path, const char *buf, size_t size, off_t offset, struct
 	strlcat(metafilename,"/",1024);
 	strlcat(metafilename,path,1024);
 	FILE *metafile=fopenr(metafilename+1,"w+");
-	//brintf("Uhm, our metafile is: %s\n",metafilename+1);
-	flock(fileno(metafile),LOCK_EX); // begin 'transactioney-thing'. EXCLUSIVE LOCK.
+	if(!metafile) {
+		brintf("Couldn't open metafile on behalf of data-write: %s\n",metafilename);
+		return -EIO;
+	}
+	brintf("Uhm, our metafile (for writing) is: %s\n",metafilename+1);
+	safe_flock(fileno(metafile),LOCK_EX,metafilename+1); // begin 'transactioney-thing'. EXCLUSIVE LOCK.
 	if(cachefile) {
 		if(fseek(cachefile,offset,SEEK_SET)==0) {
 			int results=fwrite(buf,1,size,cachefile);
 			markdirty(path);
-			faux_freshen_metadata(path);
+			//faux_freshen_metadata(path);
 			fclose(metafile); //end transactoiney thing
 			//brintf("Truncate: %d, write: %d\n",truncres,writeres);
 			return results;
@@ -460,11 +465,17 @@ pthread_t putter;
 static void *
 crest_init(struct fuse_conn_info *conn __attribute__((unused)) )
 {
-	//brintf("I'm not intending to do anything with this connection: %p\n",conn);
+	brintf("I'm not intending to do anything with this connection: %p\n",conn);
 	fchdir(cachedir);
 	close(cachedir);
 	
-	pthread_create(&putter, NULL, putting_routine,0);
+	if(strcmp(authfile,"/dev/null")!=0) {
+		printf("Creating write thread...\n");
+		pthread_create(&putter, NULL, putting_routine,0);
+		printf("Write Thread Created\n");
+	} else {
+		printf("WRITE SUPPORT DISABLED VIA /dev/null AUTHFILE\n");
+	}	
 	return 0;
 }
 
@@ -522,7 +533,7 @@ crest_mknod(const char*path,mode_t m, dev_t d __attribute__((unused)))
 		return -EIO;
 	}
 	brintf("mknod: meta file created.\n");
-	flock(fileno(meta),LOCK_EX);
+	safe_flock(fileno(meta),LOCK_EX,metafilename+1); //you're just 'touch()'ing a file, no need to go that nuts on it dude.
 	FILE * data=fopenr((char *)path+1,"w+"); //CREATE if no exist.
 	if(!data) {
 		brintf("COULD not CREATE REAL FILE! %s",path+1);
@@ -532,33 +543,58 @@ crest_mknod(const char*path,mode_t m, dev_t d __attribute__((unused)))
 	brintf("OK, fine - files created *AND* truncated!\n");
 	
 	markdirty(path); //path marked dirty so it will get 'put'
-	faux_freshen_metadata(path); //make my metadata look new but have crappy etags
+	//faux_freshen_metadata(path); //make my metadata look new but have crappy etags
 	append_parents(path); //make it look like I've been appended to my parents directory listings!
 	fclose(data);
 	fclose(meta); //causes unlock
 	return 0;
 }
 
+//there are all kinds of cross-polination of concerns leaking all over the place here.
+//first, we're directly referencing FILE *'s
+//next we're directly calling things with PENDINGDIR
+
 static int
 crest_unlink(const char *path)
 {
 	//unlink path+1
+	char metapath[1024];
+	
+	strlcpy(metapath,METAPREPEND,1024);
+	strlcat(metapath,path,1024);
+	FILE *metafile=fopenr(metapath+1,"w+");
+	if(!metafile) {
+		brintf("Could not open metafile for %s for deletion, bailing?\n",path);
+		return -EIO;
+	}
+	safe_flock(fileno(metafile),LOCK_EX,metapath+1);
+
+	char hash[23];
+	hashname(path,hash);
+	char putpath[1024];
+	strlcpy(putpath,PENDINGDIR,1024);
+	strlcat(putpath,"/",1024);
+	strlcat(putpath,hash,1024);
+	brintf("The path I would unlink would be: %s\n",putpath);
+	int unl=unlink(putpath); //if this fails, that's fine.
+	brintf("Unlink of possible put file? %d\n",unl);
+
 	int pointless=http_request(path,"DELETE",0,"unlink",0,0);
 	char *resultheaders=0;
 	recv_headers(pointless,&resultheaders);
 	wastebody("DELETE",pointless,resultheaders);
 
 	return_keep(pointless);
-	if(resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) <300) {
-		char metapath[1024];
-		strlcpy(metapath,METAPREPEND,1024);
-		strlcat(metapath,path,1024);
-	
+	if((resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) <300)|| unl==0) {
 		invalidate_parents(path);
 		free(resultheaders);
+		fclose(metafile);
 		return 0;
 	} else {
 		brintf("FALIURE Unlinking: %s\n",resultheaders);
+		printf("deletion HTTP request failed for %s: %s",path,resultheaders);
+		fclose(metafile);
+		printf("You neither deleted a putable file, nor something off the server.\n");
 		return -EIO;
 	}
 }
@@ -584,6 +620,7 @@ crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 		strlcpy(mymeta,METAPREPEND,1024);
 		strlcat(mymeta,path,1024);
 		int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
+		(void)res;
 		brintf("I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
 		return 0;
 	} else {
@@ -637,6 +674,7 @@ crest_symlink(const char *link, const char *path)
 		strlcpy(mymeta,METAPREPEND,1024);
 		strlcat(mymeta,path,1024);
 		int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
+		(void)res;
 		brintf("(DIRECTORY) I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
 		return 0;
 	} else {
@@ -810,6 +848,10 @@ addparam(int *argc,char ***argv,char *string)
 
 char authfile[256];
 
+#ifdef gnulibc
+//#include <mcheck.h>
+#endif
+
 int
 main(int argc, char **argv)
 {
@@ -824,15 +866,27 @@ main(int argc, char **argv)
 	
 	// single user, read-only. NB!
 	
+	#ifdef gnulibc	
+	//mcheck(0);
+	#endif
+	
 	if(argc<5) {
-		brintf("Not right number of args, you gave me %d\n",argc);
-		brintf("Usage: %s mountdir cachedir maxcacheage rootauthfile [options]\n",argv[0]);
+		printf("Not right number of args, you gave me %d\n",argc);
+		printf("Usage: %s mountdir cachedir maxcacheage rootauthfile [options]\n",argv[0]);
+		int j;
+		for(j=0;j<argc;j++) {
+			printf("%d: %s ",j,argv[j]);
+		}
+		printf("\n");
 		exit(1);
 	}
-	//brintf("Decent. Arg count: %d\n",argc);
+	//printf("Decent. Arg count: %d\n",argc);
 	addparam(&myargc,&myargs,argv[0]);
 	//myargs[0]=argv[0];
 	addparam(&myargc,&myargs,argv[1]);
+	#ifdef gnulibc
+	//mtrace();//do it AFTER addparam so we don't have to hear crap about it, it's supposed to leak
+	#endif
 	if(argv[1][0]!='/') {
 		char *here=getcwd(NULL,0);
 		strlcpy(rootdir,here,1024);
@@ -841,17 +895,17 @@ main(int argc, char **argv)
 	strlcat(rootdir,argv[1],1024); //first parameter, is mountpoint
 	cachedir= open(argv[2], O_RDONLY); //second parameter is cachedir
 	if(cachedir==-1) {
-		brintf("%d no open cachedir\n",cachedir);
+		printf("%d no open cachedir\n",cachedir);
 		exit(2);
 	}
 	strlcpy(cachedirname,argv[2],1024);
 	maxcacheage=atoi(argv[3]);
 	if(maxcacheage<=0) {
-		brintf("%d is not a valid max cache age\n",maxcacheage);
+		printf("%d is not a valid max cache age\n",maxcacheage);
 		exit(3);
 	}
 	strlcpy(authfile,argv[4],256);
-	brintf("Authfile: %s\n",authfile);
+	printf("Authfile: %s\n",authfile);
 		
 	for(i=5;i<argc;i++) {
 		addparam(&myargc,&myargs,argv[i]);

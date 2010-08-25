@@ -1,10 +1,25 @@
+
+#ifndef SHUTUP
+
 void brintf(char *format,...) __attribute__ ((format (printf, 1,2)));
+
+#else
+
+#define brintf(args...) {}
+
+#endif
+
+#define PENDINGDIR ".crestfs_pending_writes"
+
+int safe_flock(int filenum,int lockmode,char *filename);
 
 void pathparse(const char *path,char *hostname,char *pathonly,int hostlen,int pathlen);
 
 int asprintf(char **ret, const char *format, ...) __attribute__ ((format (printf, 2,3)));
 
 #if defined(__linux__) && !defined(__dietlibc__) && !defined(__UCLIBC__)
+
+#define gnulibc
 
 int strlcat(char *dest, const char * src, int size);
 
@@ -48,7 +63,7 @@ void invalidate_parents(const char *path); //cache-related, belongs in resource
 
 void append_parents(const char *path); //definitely cache related (similar to above)
 
-void faux_freshen_metadata(const char *path); //cache-related, also resource? 
+//void faux_freshen_metadata(const char *path); //cache-related, also resource? 
 
 void *putting_routine(void *unused); //no clue where this should go. maybe crestfs?
 

@@ -23,7 +23,7 @@ strlcat(char *dest, const char * src, int size)
 	return strlen(dest);
 }
 
-int
+inline int
 strlcpy(char *dest,const char *src, int size)
 {
 	int initialsrc=strlen(src);
@@ -85,8 +85,11 @@ fopenr(char *filename,char*mode)
 }
 
 
+char mingie[65535]="";
 
-void brintf(char *format,...)
+#ifndef SHUTUP
+
+ void brintf(char *format,...)
 {
 	va_list whatever;
 	va_start(whatever,format);
@@ -94,8 +97,23 @@ void brintf(char *format,...)
 	fflush(NULL);
 }
 
+/* void brintf(char *format,...)
+{
+	va_list myargs;
+	va_start(myargs,format);
+	static FILE *myfp=0;
+	if(!myfp) {
+		myfp=fopen("/tmp/crestlog.txt","w");
+		if(!myfp) {
+			printf("Can't open logfile\n");
+			exit(22);
+		}
+	}
+	vfprintf(myfp,format,myargs);
+	fflush(myfp);
+}
+*/
 
-char mingie[65535]="";
 
 void manglefinder(char *string,int lineno)
 {
@@ -112,11 +130,12 @@ void manglefinder(char *string,int lineno)
 }
 
 
+
+
+#endif
+
 //#define MANGLETOK manglefinder(headers,__LINE__);
 #define MANGLETOK
-
-
-
 
 
 void
@@ -290,16 +309,16 @@ pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
 void 
 hashname(const char *filename,char hash[23])
 {
-	pthread_mutex_lock(&mut);
+	unsigned int hashnum = 5381;
+	int c;
 	
-	char *ans=crypt(filename,"$1$");
-	strcpy(hash,ans+4);
-	pthread_mutex_unlock(&mut);
-	//strreplace(hash,"/","-");
-	char *iter=hash;
-	while((iter=strchr(iter,'/'))) { //gotta convert / to - for filenames
-		iter[0]='-';
+	while ((c = *filename++)) {
+		hashnum = ((hashnum << 5) + hashnum) + c; 
 	}
+		
+	snprintf(hash,23,"%x",hashnum);
+	brintf("resulting has is: %s\n",hash);
+	return;
 }
 
 char *
@@ -364,7 +383,7 @@ fill_authorization(const char *path,char *authstring,int authlen)
 		if(authlensofar>authlen) {
 			//return? What
 			//need to \0 a string first?
-			exit(57); 
+			exit(57); //I'm leaving this one, this is a BUFFER OVERFLOW!
 		}
 		
 		//remainder 0 => rightshift 10
@@ -383,7 +402,7 @@ fill_authorization(const char *path,char *authstring,int authlen)
 		break;
 	}
 	if(strlen(authstring)>(unsigned)authlen) {
-		exit(57);
+		exit(57); //BUFFER OVERFLOW! Cannot fix
 	}
 }
 
@@ -391,7 +410,6 @@ fill_authorization(const char *path,char *authstring,int authlen)
 //PUT support routines?
 
 
-#define PENDINGDIR ".crestfs_pending_writes"
 
 #include <unistd.h>
 #include <sys/stat.h>
@@ -426,11 +444,11 @@ int check_put(const char *path)
 	return (lstat(putpath,&dontcare)==0);
 }
 
-char *okstring="HTTP/1.1 200 OK\r\nEtag: \"\"\r\n\r\n";
+//char *okstring="HTTP/1.1 200 OK\r\nEtag: \"\"\r\n\r\n";
 //The blank etag is actually necessary to trigger proper stat's of the written file. UGH.
 
 #include "resource.h" //needed for putting_routine and invalidate_parents
-
+/*
 void
 faux_freshen_metadata(const char *path) //cleans and silences metadata for reasonable results to stat()'s, possibly before a file's been actually uploaded
 {
@@ -448,7 +466,7 @@ faux_freshen_metadata(const char *path) //cleans and silences metadata for reaso
 		brintf("Could not open/create metafile for faux-freshen! Silently continuing, I guess?\n");
 	}
 }
-
+*/
 #include <libgen.h> //for dirname()
 
 ///this function will prolly end up deprecated...
@@ -468,7 +486,9 @@ invalidate_parents(const char *origpath)
 	strncat(parentmetadir,parentdir,1024);
 
 	int pd=unlink(parentdir); //the actual listing...
+	(void)pd;
 	int pdm=unlink(parentmetadir+1); //the metadata about the listing
+	(void)pdm;
 	brintf("I tried to unlink some parentals for cache-invalidation - parentdir itself (%s) got me: %d; parentmetadir (%s) got: %d\n",
 		parentdir,pd,parentmetadir+1,pdm);
 	//cached directory now invalidated	
@@ -493,17 +513,37 @@ append_parents(const char *origpath)
 	strncpy(parentmetadir,METAPREPEND,1024);
 	strncat(parentmetadir,"/",1024);
 	strncat(parentmetadir,parentdir,1024);
-
+	
+	char headers[8192]="";
+	FILE *md=fopen(parentmetadir+1,"r");
+	if(!md) {
+		//no metadata file to append to! Get the hell outta here. return.
+		return;
+	}
+	int bytes=fread(headers,1,8192,md);
+	headers[bytes+1]='\0';
+	fclose(md);
+	
+	char contenttype[1024]="";
+	fetchheader(headers,"content-type",contenttype,1024);
+	
 	FILE *p=fopen(parentdir,"a");
 	if(p) {
-		fputs("\n<a href='",p);
-		fputs(appendme,p);
-		fputs("'>",p);
-		fputs(appendme,p);
-		fputs("</a>\n",p);
+		if(strcasecmp(contenttype,"x-vnd.bespin.corp/directory-manifest")!=0) {
+			fputs("\n<a href='",p);
+			fputs(appendme,p);
+			fputs("'>",p);
+			fputs(appendme,p);
+			fputs("</a>\n",p);
+		} else {
+			fputs("noetags ",p);
+			fputs(appendme,p);
+			fputs("\n",p);
+		}
 		fclose(p);
 		int pdm=utime(parentmetadir+1,0); //the metadata about the listing.
 							//I'm not sure I like this - it 'freshens' the listing, possibly incorrectly
+		(void)pdm;
 		brintf("I tried to augment the parentals parentdir itself (%s) got me: %p; parentmetadir (%s) got: %d\n",
 			parentdir,p,parentmetadir+1,pdm);
 	} else {
@@ -513,6 +553,26 @@ append_parents(const char *origpath)
 	//cached directory now invalidated	
 }
 
+#include <sys/file.h> //for flock params.
+#include <errno.h>
+
+int safe_flock(int filenum,int lockmode,char *filename)
+{
+	int lockresults=flock(filenum,lockmode|LOCK_NB);
+	if(lockresults==0) {
+		printf("Lock attempt on %s succeeded!\n",filename);
+		return 0; //good.
+	}
+	int attempts=1;
+	while(lockresults==-1 && attempts < 15) {
+		brintf("ATTEMPT %d failed to lock %s because of: %d, sleeping...\n",attempts,filename,errno);
+		printf("Lock attempt on %s failed, retrying...\n",filename);
+		sleep(1);
+		lockresults=flock(filenum,lockmode|LOCK_NB);
+		attempts++;
+	}
+	return lockresults; //will be 0 on success, -1 otherwise...
+}
 
 #include <dirent.h>
 #include <sys/file.h>
@@ -533,7 +593,7 @@ putting_routine(void *unused __attribute__((unused)))
 		struct dirent *dp=0;
 		memset(&mydirent,0,sizeof(mydirent));
 		if(pendingdir==0) {
-			brintf("Error opening pendingdir is: %s\n",strerror(errno));
+			brintf("Error opening pendingdir(%s) is: %s\n",PENDINGDIR,strerror(errno));
 			sleep(10);
 			continue;
 		}
@@ -582,7 +642,7 @@ putting_routine(void *unused __attribute__((unused)))
 			FILE *metafile=fopen(metafilename+1,"r+");
 			int lck=-1;
 			if(metafile) {
-				lck=flock(fileno(metafile),LOCK_EX);
+				lck=safe_flock(fileno(metafile),LOCK_EX,metafilename+1);
 			}
 			brintf("We are going to try to open metafile: %s. results: %p. lockstatus: %d\n",metafilename+1,metafile,lck);
 			FILE *contentfile=fopen(linktarget+3,"r");
@@ -597,7 +657,7 @@ putting_routine(void *unused __attribute__((unused)))
 			free(headerplus);
 			if(fd<=0) {
 				brintf("Seriously weird problem with http_request, going for next iteration in loop...(%s)\n",strerror(errno));
-				free(headerpointer);
+				//free(headerpointer); //no, dickweed, this hasn't been allocated yet.
 				fclose(metafile);
 				continue;
 			}
@@ -685,7 +745,7 @@ recv_headers(int mysocket,char **headerpointer/* ,void **bodypiece */)
 		char linebuf[1024]="";
 		fgets(linebuf,1024,web);
 		bytesofheader+=strlen(linebuf);
-		brintf("First header line: strlen is %d, header is: %d, line is :%s",strlen(linebuf),bytesofheader,linebuf);
+		brintf("header line[%d]: strlen is %d, header is: %d, line is :%s",i,strlen(linebuf),bytesofheader,linebuf);
 		*headerpointer=realloc(*headerpointer,bytesofheader+1);
 		strcat(*headerpointer,linebuf);
 		if(strcmp(linebuf,"\r\n")==0) {
@@ -718,7 +778,7 @@ init_directory_iterator(directory_iterator *iter,const char *headers, FILE *fp) 
 			char error[80];
 			regerror(status,&re,error,80);
 			brintf("ERROR COMPILING REGEX: %s\n",error);
-			exit(98);
+			exit(98); //All directory parsing will now, and forever, fail. Exit is ok.
 		}
 		initted=1;
 	}
@@ -727,7 +787,7 @@ init_directory_iterator(directory_iterator *iter,const char *headers, FILE *fp) 
 	
 	if(fp==0) {
 		brintf("FAIL URE - I cannot iterate on 'empty!'\n");
-		exit(62);
+		exit(62); //it's never really gonna work  - I could allow this, then the next thing would break, etc...
 	}
 	char contenttype[1024]="";
 	brintf("Mine Headers arE: %s",headers);
@@ -740,7 +800,7 @@ init_directory_iterator(directory_iterator *iter,const char *headers, FILE *fp) 
 		iter->iterator.htmlmode.directory_buffer=calloc(DIRBUFFER,1);
 		if(iter->iterator.htmlmode.directory_buffer==0) {
 			brintf("Great, can't malloc our dirbuffer. baililng.\n");
-			exit(19);
+			exit(19); //out of memory. good reason to Fail.
 		}
 		iter->iterator.htmlmode.directory_buffer[0]='\0';
 		fread(iter->iterator.htmlmode.directory_buffer,1,DIRBUFFER,fp);

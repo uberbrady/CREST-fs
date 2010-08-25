@@ -282,7 +282,9 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 	//brintf("Getaddrinfo timing test: BEFORE: %ld\n",start);
 	
 	sockfd=find_keep(hostpart);
+	brintf("finished find keep: %d\n",sockfd);
 	if(sockfd==-1) {
+		brintf("Sockfd was -1\n");
 		int rv;
 		struct addrinfo hints, *servinfo=0, *p=0;
 		memset(&hints, 0, sizeof hints);
@@ -319,7 +321,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		}
 
 		if (p == NULL) {
-			fprintf(stderr, "client: failed to connect\n");
+			brintf("client: failed to connect\n");
 			close(sockfd);
 			return 0;
 		}
@@ -425,8 +427,8 @@ straight_handler(int contentlength,int fdesc,FILE *datafile)
 	if(blocklen>0) {
 		char *mybuffer=malloc(blocklen);
 		while((bytes = recv(fdesc,mybuffer,blocklen,0))) { //re-use existing buffer
-			if(bytes==-1 && errno==EAGAIN) {
-				brintf("Recv reported EAGAIN\n");
+			if(bytes==-1 && (errno==EAGAIN || errno==EINTR)) {
+				brintf("Recv reported EAGAIN or EINTR\n");
 				continue;
 			}
 			if(bytes<=0) {
@@ -504,9 +506,9 @@ chunked_handler(int fdesc,FILE *datafile)
 			if(readbytes==chunkbytes) {
 				brintf("YAY! end of chunk!");
 				char crlf[2];
-				int r=fread(crlf,1,2,webs);
+				int r=fread(crlf,1,2,webs); (void)r;
 				if(crlf[0]!='\r' || crlf[1]!='\n') {
-					printf("CRLF fail! We expected CRLF (\\r \\n, 13 10), and got (%hhd %hhd). read said: %d\n",crlf[0],crlf[1],r);
+					brintf("CRLF fail! We expected CRLF (\\r \\n, 13 10), and got (%hhd %hhd). read said: %d\n",crlf[0],crlf[1],r);
 				}
 				chunkbytes=-1;
 			}
@@ -582,7 +584,8 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 				if(strcmp(etag,fileetag)==0) {
 					stamp.modtime=time(0); //NOW!
 					brintf("%s UTIMING NEW!\n",filename);
-					utime(direlem+1,&stamp); //Match! So this file is GOOD as of right now!
+					//utime(direlem+1,&stamp); //Match! So this file is GOOD as of right now!
+					utime(direlem+1,0);
 				} else {
 					stamp.modtime=0; //EPOCH! LONG TIME AGO!
 					brintf("%s UTIMING OLD!\n",filename);
@@ -600,6 +603,8 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 		free_directory_iterator(&iter);
 	}
 }
+
+char *okstring="HTTP/1.1 200 OK\r\nEtag: \"\"\r\n\r\n";
 
 FILE *
 get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode)
@@ -640,13 +645,6 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			//if the resource you're looking for turns out to actually *be* a directory, this function will get reinvoked
 			//this means we could get into an infinite loop if a you request a resource "foo" that returns a redirect to "foo/"
 			//(which implies it's a directory), and then when you try to GET foo/ , you get a 404 - this will loop forever.
-	if(impossible_file(path)) {
-		if(headers && headerlength>0) {
-			headers[0]='\0';
-		}
-		free(headerbuf);
-		return 0;
-	}
 	//FIXME - better than this would be to see inthe directory listing somewher eif this entry exist
 	//and has a / after it - if so, hint it to being a directory!!!!!!!!
 	//that will improve 'raw' ls -lR performance
@@ -693,7 +691,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	if(headerfile) {
 		struct stat statbuf;
 		int s=-1;
-		flock(fileno(headerfile),LOCK_SH);
+		safe_flock(fileno(headerfile),LOCK_SH,headerfilename);
 		s=stat(headerfilename,&statbuf); //assume infallible
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
 		int hdrbytesread=fread(headerbuf,1,65535,headerfile);
@@ -713,8 +711,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		}
 		
 		int has_file_been_PUT=check_put(path);
-		printf("Has the file been PUT? Answer: %d\n",has_file_been_PUT);
-
+		brintf("Has the file been PUT? Answer: %d\n",has_file_been_PUT);
+		
 		if((time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) || has_file_been_PUT) {
 			//our cachefile is recent enough and big enough, or there's been an intervening PUT
 			FILE *tmp=0;
@@ -738,20 +736,58 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				I think the 'real' solution is to do the etags-fetching business (below) up here somewhere instead, so we've
 				already 'upgraded' the selectedverb to GET. Yeah, that sounds good?
 			*/
-			if(strcmp(selectedverb,"HEAD")==0 || 
-					(!(fetchstatus(headerbuf)>=200 && fetchstatus(headerbuf)<=299) && fetchstatus(headerbuf)!=304) || (tmp=fopen(cachefilebase,cachefilemode))) {
-				printf("RECENT ENOUGH CACHE! SHORT_CIRCUIT! cahcefile: %s, time: %ld, st_mtime: %ld, maxcacheage: %d, fileage: %ld, verb: %s, status: %d, ptr: %p\n",
-					cachefilebase,time(0),statbuf.st_mtime,maxcacheage,time(0)-statbuf.st_mtime,selectedverb,fetchstatus(headerbuf),tmp);
-				if(headers && headerlength>0) {
+			
+			/* translation of this 'if' statement:
+				Either - 
+					you're doing a 'HEAD' - OR
+					the status isn't 2xx or 304 (or 302?)
+					-OR you can open the file
+					
+			*/
+			if(has_file_been_PUT) {
+				//pseudo up the headers for a put file
+				strncpy(headerbuf,okstring,65535);
+			}
+			brintf("COMPLICATED QUESTION: verb: %s, status: %d\n",selectedverb,fetchstatus(headerbuf));
+			
+			/* problem - this is *not* using cached data for HEAD's that don't return files - 
+			e.g. - I stat() a file without grabbing it. That causes a HEAD
+			I don't ever fetch the file. Later, I stat() it again. That result should be cached
+			But it isn't (because there's no file-file behind it).
+			*/
+			
+			if(strcmp(selectedverb,"GET")==0 || //if you asked for a GET, or
+				(fetchstatus(headerbuf)>=200 && fetchstatus(headerbuf)<=299) ||  //you got a 200 series code...
+				fetchstatus(headerbuf)==304 || //or a 304 etag-match message...  
+				has_file_been_PUT ) //or file was recently PUT
+			{
+				//THEN you need a real live file pointer returned to you
+				tmp=fopen(cachefilebase,cachefilemode);
+				//if it was a HEAD request, it's okay if you couldn't get the file
+				if(tmp || strcmp(selectedverb,"HEAD")==0) { 
+					if(headers && headerlength>0) {
+						strncpy(headers,headerbuf,headerlength);
+					}
+					fclose(headerfile); //RELEASE LOCK!!!!!
+					free(headerbuf);
+					return tmp;
+				} else {
+					brintf("You tried to open the cachefile %s in mode %s and FAILED, so fallthrough.\n",
+						cachefilebase,cachefilemode);
+				}
+			} else {
+				//you don't need no stinkin' files!
+				brintf("No files are needed, allegedly. returning probably a nil for file pointer\n");
+				if(headers && headerlength >0) {
 					strncpy(headers,headerbuf,headerlength);
 				}
-				fclose(headerfile); //RELEASE LOCK!!!!!
+				fclose(headerfile); //releasing that same lock...
 				free(headerbuf);
-				return tmp;
-			} else {
-				brintf("I guess I couldn't open my cachefile...going through default behavior (bleh)\n");
-				dontuseetags=1;
+				return 0;
 			}
+			brintf("I guess I couldn't open my cachefile...going through default behavior (bleh)\n");
+			dontuseetags=1;
+			
 		} else {
 			brintf("Cache file is too old (or too small); continuing with normal behavior. cachefilename: %s Age: %ld maxcacheage: %d, filesize: %d\n",
 				headerfilename,(int)time(0)-statbuf.st_mtime,maxcacheage,(int)statbuf.st_size);
@@ -769,12 +805,22 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			return 0;
 			//headerfile=fopenr(headerfilename,"w"); //this means a race was found and prevented(?)
 		}
-		flock(fileno(headerfile),LOCK_SH); //shared lock will immediately be upgraded...
+		safe_flock(fileno(headerfile),LOCK_SH,headerfilename); //shared lock will immediately be upgraded...
 	}
 	
 	//either there is no cachefile for the headers, or it's too old.
 	//the weird thing is, we have to be prepared to return our (possibly-outdated) cache, if we can't get on the internet
 	
+	//Here's the new impossible file detection - wait till you had a chance to return cached data first
+	//then check if the file is impossible at the LAST MINUTE - *RIGHT* before you'd hit the Internets	
+	if(impossible_file(path)) {
+		if(headers && headerlength>0) {
+			headers[0]='\0';
+		}
+		free(headerbuf);
+		fclose(headerfile);
+		return 0;
+	}
 	char acceptheader[80]="";
 	if(dirmode) {
 		strcpy(acceptheader,"Accept: x-vnd.bespin.corp/directory-manifest, */*; q=0.5");
@@ -831,8 +877,6 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					close(mysocket);
 				free(headerbuf);
 				return_keep(mysocket);
-				if(strcasecmp(connection,"close")==0)
-					close(mysocket);
 				brintf("Ready to return..\n");
 				return datafile;
 			}
@@ -857,7 +901,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				*/
 				//brintf("We should be fputsing it to: %p\n",headerfile);
 				//need to upgrade read-lock to WRITE lock
-				flock(fileno(headerfile),LOCK_EX); //lock upgrade!
+				safe_flock(fileno(headerfile),LOCK_EX,headerfilename); //lock upgrade!
 				truncatestatus=ftruncate(fileno(headerfile),0); // we are OVERWRITING THE HEADERS - we got new headers, they're good, we wanna use 'em
 				rewind(headerfile); //I think I have to do this or it will re-fill with 0's?!
 				//brintf(" Craziness - the number of bytes we should be fputsing is: %d\n",strlen(mybuffer));
@@ -995,8 +1039,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					//and RETRY REQUEST!!!
 
 					//be prepared to drop a 404 cachefile! This will prevent repeated requests for nonexistent entities
-					wastebody(selectedverb,mysocket,received_headers);
 					if(dirmode) {
+						wastebody(selectedverb,mysocket,received_headers);
 						//we 404'ed (or 403'ed) in dirmode. Shit.
 						char headerdirname[1024];
 						brintf("Directory mode resulted in 404. Retrying as regular file...\n");
@@ -1015,6 +1059,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						strlcat(modpurpose,"+plainrefetch",1024);
 						return_keep(mysocket);
 						free(headerbuf);
+						if (headerfile) fclose(headerfile); //need this?! release lock?
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode);
 					}
 					//NOTE! We are *NOT* 'break'ing after this case! We are deliberately falling into the following case
@@ -1030,12 +1075,19 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					free(received_headers);
 					return_keep(mysocket);
 					free(headerbuf);
+					if (headerfile) fclose(headerfile); //release lock, no?
 					return 0; //nonexistent file, return 0, hold on to cache, no datafile exists.
 					break;
 
 					default:
-					brintf("Unknown HTTP status?!");
-					exit(23); //not implemented
+					brintf("Unknown HTTP status (%d): %s\n",fetchstatus(received_headers),received_headers);
+					close(mysocket);
+					//return_keep(mysocket);
+					delete_keep(mysocket);
+					free(received_headers);
+					free(headerbuf);
+					fclose(headerfile); //release lock!
+					return 0;
 					break;
 				} //end switch on http status
 			} //end 'else' clause about whether we have CREST headers or not
