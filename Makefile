@@ -8,7 +8,7 @@ gcc=i686-linux-uclibc-gcc
 CFLAGS=-D_FILE_OFFSET_BITS=64 -g -O2
 #only want this for the Static builds, not the regular Dynamic ones.
 SILENCE=-DSHUTUP
-#SILENCE=
+SILENCE=
 
 
 .PHONY: ALL testdriven clean

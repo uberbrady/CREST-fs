@@ -558,6 +558,7 @@ append_parents(const char *origpath)
 
 int safe_flock(int filenum,int lockmode,char *filename)
 {
+return 0;
 	int lockresults=flock(filenum,lockmode|LOCK_NB);
 	if(lockresults==0) {
 		printf("Lock attempt on %s succeeded!\n",filename);
@@ -714,9 +715,9 @@ putting_routine(void *unused __attribute__((unused)))
 			} else {
 				brintf("Status isn't in the 200 range I'm expecting: %d\n",status);
 				brintf("Headers for fail are: %s\n",headerpointer);
-				free(headerpointer);
 				//close(fd); //goddammit! Stop that rude garbage!
 				wastebody("PUT",fd,headerpointer);
+				free(headerpointer);
 				return_keep(fd);
 				fclose(metafile);
 			}

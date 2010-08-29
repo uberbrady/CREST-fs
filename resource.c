@@ -185,6 +185,8 @@ find_keep(char *hostname)
 					return -1; 
 				}
 				return newfd; */
+			} else {
+				brintf("Well, I found a good keepalive candidate, but it's already in use: %d\n",*inuse);
 			}
 		}
 	}
@@ -245,6 +247,7 @@ return_keep(int fd)
 	for(i=0;i<curkeep;i++) {
 		if(keepalives[i].fd==fd) {
 			keepalives[i].inuse--;
+			brintf("Returning a keepalive for host %s, inuse is now: %d\n",keepalives[i].host,keepalives[i].inuse);
 			pthread_mutex_unlock(&keep_mut);
 			return;
 		}
@@ -294,7 +297,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		if ((rv = getaddrinfo(hostpart, "80", &hints, &servinfo)) != 0) {
 			brintf("Getaddrinfo timing test: FAIL-AFTER: %ld - couldn't lookup %s because: %s\n",
 				time(0)-start,hostpart,gai_strerror(rv));
-			return 0;
+			return -1;
 		}
 		brintf("Got getaddrinfo()...GOOD-AFTER: %ld\n",time(0)-start);
 
@@ -323,7 +326,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		if (p == NULL) {
 			brintf("client: failed to connect\n");
 			close(sockfd);
-			return 0;
+			return -1;
 		}
 
 		brintf("Okay, connectication has occurenced connect-AFTER: %ld\n",time(0)-start);
@@ -407,7 +410,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 			}
 			return http_request(fspath,verb,etag,modrefer,extraheaders,body);
 		} else {
-			return 0;
+			return -1;
 		}
 	}
 
@@ -606,6 +609,12 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 
 char *okstring="HTTP/1.1 200 OK\r\nEtag: \"\"\r\n\r\n";
 
+int dont_fclose(FILE *f)
+{
+	brintf("actually fclosing File: %p\n",f);
+	return fclose(f);
+}
+
 FILE *
 get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode)
 {
@@ -768,7 +777,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					if(headers && headerlength>0) {
 						strncpy(headers,headerbuf,headerlength);
 					}
-					fclose(headerfile); //RELEASE LOCK!!!!!
+					dont_fclose(headerfile); //RELEASE LOCK!!!!!
 					free(headerbuf);
 					return tmp;
 				} else {
@@ -781,7 +790,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				if(headers && headerlength >0) {
 					strncpy(headers,headerbuf,headerlength);
 				}
-				fclose(headerfile); //releasing that same lock...
+				dont_fclose(headerfile); //releasing that same lock...
 				free(headerbuf);
 				return 0;
 			}
@@ -818,7 +827,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			headers[0]='\0';
 		}
 		free(headerbuf);
-		fclose(headerfile);
+		dont_fclose(headerfile);
 		return 0;
 	}
 	char acceptheader[80]="";
@@ -870,8 +879,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					brintf("(HEADERBUF SEZ: %s)\n",headerbuf);
 					directory_freshen(path,headerbuf,datafile);
 				}
-				brintf("Bout to fclose\n");
-				fclose(headerfile); // RELEASE LOCK
+				brintf("Bout to dont_fclose\n");
+				dont_fclose(headerfile); // RELEASE LOCK
 				free(received_headers);
 				if(strcasecmp(connection,"close")==0)
 					close(mysocket);
@@ -937,7 +946,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					//ONE THING WE NEED TO NOTE - if this was a HEAD instead of a GET,
 					//we need to be sensitive about the cachefile?
 					if(strcmp(selectedverb,"HEAD")==0) {
-						fclose(headerfile); //RELEASE LOCK!
+						dont_fclose(headerfile); //RELEASE LOCK!
 						free(received_headers);
 						brintf("DUDE TOTALLY SUCKY!!!! Somebody HEAD'ed a resource and we had to unlink its data file.\n");
 						unlink(cachefilebase);
@@ -978,7 +987,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						brintf("DIRMODE - FRSHEN!\n");
 						directory_freshen(path,received_headers,datafile);
 					}
-					fclose(headerfile); //RELEASE LOCK
+					dont_fclose(headerfile); //RELEASE LOCK
 					free(received_headers);
 					if(strcasecmp(connection,"close")==0)
 						close(mysocket);
@@ -1007,7 +1016,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						mkdir(cachefilebase,0700); 
 						unlink(headerfilename); //the headerfile being a file will mess things up too
 									//and besides, it's just going to say '301', which isn't helpful
-						fclose(headerfile);
+						dont_fclose(headerfile);
 						free(received_headers);
 						if(strcasecmp(connection,"close")==0)
 							close(mysocket);
@@ -1024,7 +1033,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					//otherwise (no slash at end of location path), we must be a plain, boring symlink or some such.
 					//yawn.
 					brintf("Not a directory, treating as symlink...\n");
-					fclose(headerfile); //release lock
+					dont_fclose(headerfile); //release lock
 					free(received_headers);
 					if(strcasecmp(connection,"close")==0)
 						close(mysocket);
@@ -1059,7 +1068,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						strlcat(modpurpose,"+plainrefetch",1024);
 						return_keep(mysocket);
 						free(headerbuf);
-						if (headerfile) fclose(headerfile); //need this?! release lock?
+						if (headerfile) dont_fclose(headerfile); //need this?! release lock?
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode);
 					}
 					//NOTE! We are *NOT* 'break'ing after this case! We are deliberately falling into the following case
@@ -1069,13 +1078,16 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					case 401: //requires authentication
 					wastebody(selectedverb,mysocket,received_headers);
 					brintf("404/403/401 mode, I *may* be closing the cache header file...\n");
-					brintf(" Results: %d",fclose(headerfile)); //Need to release locks on 404's too!
+					if(headerfile) {
+						brintf(" Results: %d\n",dont_fclose(headerfile)); //Need to release locks on 404's too! //BAD
+					} else {
+						brintf(" No headerfile to close\n");
+					}
 					if(strcasecmp(connection,"close")==0)
 						close(mysocket);
 					free(received_headers);
 					return_keep(mysocket);
 					free(headerbuf);
-					if (headerfile) fclose(headerfile); //release lock, no?
 					return 0; //nonexistent file, return 0, hold on to cache, no datafile exists.
 					break;
 
@@ -1086,7 +1098,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					delete_keep(mysocket);
 					free(received_headers);
 					free(headerbuf);
-					fclose(headerfile); //release lock!
+					if(headerfile) {
+						dont_fclose(headerfile); //release lock!if you have it...
+					}
 					return 0;
 					break;
 				} //end switch on http status
@@ -1126,8 +1140,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	} else {
 		brintf("Either couldn't stat cache or cache ain't a plain file: %s\n",strerror(errno));
 	}
-	fclose(headerfile); //RELEASE LOCK!
-	brintf("fclose'd headerfile\n");
+	dont_fclose(headerfile); //RELEASE LOCK!
+	brintf("dont_fclose'd headerfile\n");
 	brintf("About to return data file: %p\n",staledata);
 	return_keep(mysocket);
 	return staledata;

@@ -580,6 +580,10 @@ crest_unlink(const char *path)
 	brintf("Unlink of possible put file? %d\n",unl);
 
 	int pointless=http_request(path,"DELETE",0,"unlink",0,0);
+	if(pointless<=0) {
+		fclose(metafile);
+		return -EAGAIN;
+	}
 	char *resultheaders=0;
 	recv_headers(pointless,&resultheaders);
 	wastebody("DELETE",pointless,resultheaders);
@@ -608,6 +612,9 @@ crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 	strlcpy(dirpath,path,1024);
 	strlcat(dirpath,"/",1024);
 	int dontcare=http_request(dirpath,"PUT",0,"mkdir",0,0);
+	if(dontcare<=0) {
+		return -EAGAIN;
+	}
 	recv_headers(dontcare,&resultheaders);
 	wastebody("PUT",dontcare,resultheaders); //we may have received a body, get rid.
 	//close(dontcare); //no, that's poor manners.
@@ -660,6 +667,9 @@ crest_symlink(const char *link, const char *path)
 	snprintf(clen,1024,"Content-length: %d",strlen(link)); //also used to be strlen(netwraget)
 	int wha=http_request(path,"POST",0,"symlink",clen,f);
 	fclose(f);
+	if(wha<=0) {
+		return -EAGAIN;
+	}
 	char *headers=0;
 	recv_headers(wha,&headers);
 	wastebody("POST",wha,headers);
@@ -849,7 +859,7 @@ addparam(int *argc,char ***argv,char *string)
 char authfile[256];
 
 #ifdef gnulibc
-//#include <mcheck.h>
+#include <mcheck.h>
 #endif
 
 int
@@ -885,7 +895,7 @@ main(int argc, char **argv)
 	//myargs[0]=argv[0];
 	addparam(&myargc,&myargs,argv[1]);
 	#ifdef gnulibc
-	//mtrace();//do it AFTER addparam so we don't have to hear crap about it, it's supposed to leak
+	mtrace();//do it AFTER addparam so we don't have to hear crap about it, it's supposed to leak
 	#endif
 	if(argv[1][0]!='/') {
 		char *here=getcwd(NULL,0);
