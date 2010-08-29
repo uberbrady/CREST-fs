@@ -24,8 +24,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netdb.h>
 #include <errno.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -34,6 +32,7 @@
 
 #include "resource.h"
 #include "common.h"
+#include "http.h"
 //path will look like "/domainname.com/directoryname/file" - with leading slash
 
 /*
@@ -139,414 +138,7 @@ impossible_file(const char *origpath)
 	return 0; //must not be impossible, or we would've returned previously
 }
 
-/* keepalive support */
 
-struct keepalive {
-	char *host;
-	int fd;
-	int inuse;
-	//some sort of time thing?
-};
-
-
-#include <pthread.h>
-
-pthread_mutex_t keep_mut = PTHREAD_MUTEX_INITIALIZER;
-
-#define MAXKEEP 32
-//we want this normaly to be higher - say, 32 or so? But I lowered it to look at a bug
-
-struct keepalive keepalives[MAXKEEP];
-int curkeep=0;
-
-int
-find_keep(char *hostname)
-{
-	int i;
-	pthread_mutex_lock(&keep_mut);
-	for(i=0;i<curkeep;i++) {
-		if(keepalives[i].host && strcasecmp(hostname,keepalives[i].host)==0) {
-			//int newfd=-1;
-			int *inuse=&keepalives[i].inuse;
-			//brintf("Found a valid keepalive at index: %d\n",i);
-			//fcntl(poo)
-			if(*inuse==0) {		//This should be an atomic test-and-set
-				(*inuse)++;	//But I don't know how to do that ...
-				pthread_mutex_unlock(&keep_mut);
-				return keepalives[i].fd;
-				/*
-				newfd=dup(keepalives[i].fd);
-				if(newfd==-1) {
-					brintf("keepalive dup failed, blanking and closing that entry(%i)\n",i);
-					free(keepalives[i].host);
-					keepalives[i].host=0;
-					close(keepalives[i].fd);
-					keepalives[i].fd=0;
-					return -1; 
-				}
-				return newfd; */
-			} else {
-				brintf("Well, I found a good keepalive candidate, but it's already in use: %d\n",*inuse);
-			}
-		}
-	}
-	brintf("NO valid keepalive available for %s, current entry count: %d\n",hostname,curkeep);
-	pthread_mutex_unlock(&keep_mut);
-	return -1;
-}
-
-int
-insert_keep(char *hostname,int fd)
-{
-	//re-use empty slots
-	int i;
-	brintf("Inserting keepalive for hostname: %s\n",hostname);
-	for(i=0;i<curkeep;i++) {
-		if(keepalives[i].host==0) {
-			brintf("Reusing keepalive slot %d for insert for host %s\n",i,hostname);
-			keepalives[i].host=strdup(hostname);
-			keepalives[i].fd=fd;
-			keepalives[i].inuse=1;
-			return 1;
-		}
-	}
-	if(curkeep<MAXKEEP) {
-		keepalives[curkeep].host=strdup(hostname);
-		keepalives[curkeep].fd=fd;
-		keepalives[curkeep].inuse=1;
-		curkeep++;
-		return 1;
-	}
-	return 0;
-}
-
-int
-delete_keep(int fd)
-{
-	int i;
-	for(i=0;i<curkeep;i++) {
-		if(keepalives[i].fd == fd) {
-			brintf("Found the keepalive to delete for host %s (%d).\n",keepalives[i].host,i);
-			free(keepalives[i].host);
-			keepalives[i].host=0;
-			//close(keepalives[i].fd); //whoever else is using this FD can keep using it, but we don't wanna keep it open anymore
-			//whoever's deleting can close it, but I ain't gon do it
-			keepalives[i].fd=0;
-			keepalives[i].inuse=0;
-			return 1;
-		}
-	}
-	return 0;
-}
-
-void
-return_keep(int fd)
-{
-	int i;
-	pthread_mutex_lock(&keep_mut);
-	for(i=0;i<curkeep;i++) {
-		if(keepalives[i].fd==fd) {
-			keepalives[i].inuse--;
-			brintf("Returning a keepalive for host %s, inuse is now: %d\n",keepalives[i].host,keepalives[i].inuse);
-			pthread_mutex_unlock(&keep_mut);
-			return;
-		}
-	}
-	brintf("Someone tried to return keepalive with FD: %d and I couldn't find it.\n",fd);
-	pthread_mutex_unlock(&keep_mut);
-}
-/* end keepalive support */
-
-#include <resolv.h>
-
-//http_request - extra headers are optional (0 is ok), and so is the body param (0)
-//http_request does *NOT* know which headers to add - e.g. content-length (!) so 
-//that's your problem, not its. It's got enough to do already.
-//extra-headers is full HTTP headers separated by \r\n. It will add the last \r\n for you, so just keep it like:
-//	"foo: bar\r\nbaz: bif"
-//The 'body', if set, will be transmitted after the headers. Closing the body file pointer is your problem.
-
-int
-http_request(const char *fspath,char *verb,char *etag, char *referer,char *extraheaders,FILE *body)
-{
-	char hostpart[1024]="";
-	char pathpart[1024]="";
-	pathparse(fspath,hostpart,pathpart,1024,1024);
-	int sockfd=-1;
-	char *reqstr=0;
-	char extraheadersbuf[16384];
-	long start=0;
-	int keptalive=0;
-	
-	//brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
-	
-	brintf("http_request: VERB: %s, URL: %s, referer: %s, extraheaders: %s, body pointer: %p\n",verb,fspath,referer,extraheaders,body);
-	start=time(0);
-	//brintf("Getaddrinfo timing test: BEFORE: %ld\n",start);
-	
-	sockfd=find_keep(hostpart);
-	brintf("finished find keep: %d\n",sockfd);
-	if(sockfd==-1) {
-		brintf("Sockfd was -1\n");
-		int rv;
-		struct addrinfo hints, *servinfo=0, *p=0;
-		memset(&hints, 0, sizeof hints);
-		hints.ai_family = AF_UNSPEC;
-		hints.ai_socktype = SOCK_STREAM;
-
-		if ((rv = getaddrinfo(hostpart, "80", &hints, &servinfo)) != 0) {
-			brintf("Getaddrinfo timing test: FAIL-AFTER: %ld - couldn't lookup %s because: %s\n",
-				time(0)-start,hostpart,gai_strerror(rv));
-			return -1;
-		}
-		brintf("Got getaddrinfo()...GOOD-AFTER: %ld\n",time(0)-start);
-
-		// loop through all the results and connect to the first we can
-		for(p = servinfo; p != NULL; p = p->ai_next) {
-			if ((sockfd = socket(p->ai_family, p->ai_socktype,
-					p->ai_protocol)) == -1) {
-				perror("client: socket");
-				continue;
-			}
-			struct timeval to;
-			memset(&to,0,sizeof(to));
-			to.tv_sec = 3;
-			setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
-			setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
-
-			if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
-				close(sockfd);
-				perror("client: connect");
-				continue;
-			}
-
-			break;
-		}
-
-		if (p == NULL) {
-			brintf("client: failed to connect\n");
-			close(sockfd);
-			return -1;
-		}
-
-		brintf("Okay, connectication has occurenced connect-AFTER: %ld\n",time(0)-start);
-		insert_keep(hostpart,sockfd);
-		freeaddrinfo(servinfo); // all done with this structure
-	} else {
-		brintf("Using kept-alive connection... keep-AFTER: %ld\n",time(0)-start);
-		keptalive=1;
-	}
-
-/*     getsockname(sockfd, s, sizeof s);
-    brintf("client: connecting to %s\n", s);
-*/
-	//extraheadersbuf should either be blank, or be terminated with \r\n
-	if(etag && strcmp(etag,"")!=0) {
-		strcpy(extraheadersbuf,"If-None-Match: ");
-		strlcat(extraheadersbuf,etag,16384);
-		strlcat(extraheadersbuf,"\r\n",16384);
-	} else {
-		extraheadersbuf[0]='\0';
-	}
-	if(extraheaders && strlen(extraheaders)>0) {
-		strlcat(extraheadersbuf,extraheaders,16384);
-		strlcat(extraheadersbuf,"\r\n",16384);
-	}
-	brintf("Checking to see if authorization is desired for %s: %s\n",fspath,wants_auth(fspath));
-	if(wants_auth(fspath)) {
-		char authstring[80]="\0";
-		fill_authorization(fspath,authstring,80);
-		strlcat(extraheadersbuf,authstring,16384);
-		strlcat(extraheadersbuf,"\r\n",16384);
-	}
-	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/1.0\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,extraheadersbuf);
-	brintf("REQUEST: %s\n",reqstr);
-	int sendresults=send(sockfd,reqstr,strlen(reqstr),0);
-	free(reqstr);
-	brintf("from start to SEND-AFTER delay was: %ld\n",time(0)-start);
-	int bodysendresults=1;
-	if(body) {
-		brintf("We are given an entity-body in http_request! Sending it along...\n");
-		char bodybuf[1024];
-		int bytesread=-1;
-		while(!feof(body) && !ferror(body)) {
-			bytesread=fread(bodybuf,1,1024,body);
-			//brintf("Not at end yet, read this many bytes: %d\n",bytesread);
-			if(send(sockfd,bodybuf,bytesread,0)==-1) {
-				brintf("Error in sending (got -1)...think that is a big fail-o\n");
-				bodysendresults=-1;
-				break;
-			}
-		}
-		send(sockfd,"\r\n",2,0); // I can't see why in the spec this is necessary, but it seems to be how it works...
-	}
-	
-	//brintf("Sendresults on socket are: %d, keptalive is: %d\n",sendresults,keptalive);
-	char peekbuf[8];
-	int peekresults=0;
-	do {
-		peekresults=recv(sockfd, peekbuf, sizeof(peekbuf), MSG_PEEK);
-	} while (peekresults==-1 && errno== EAGAIN );
-	if(peekresults>0) {
-		//brintf("Buffer peek says: %c%c%c%c\n",peekbuf[0],peekbuf[1],peekbuf[2],peekbuf[3]);
-	} else {
-		brintf("peek failed :(\n");
-	}
-	brintf("Recv delay from start - RECV-AFTER was: %ld\n",time(0)-start);
-	if(sendresults<=0 || peekresults<=0 || bodysendresults<=0) {
-		brintf("Bad socket?! BELETING! sendresults: %d, peekresults: %d bodysendresults: %d(Reason: %s)\n",sendresults,peekresults,bodysendresults,strerror(errno));
-		//either we GOT this from the keepalive pool, or we INSERTED it into the pool - either way, pull it out now!!!
-		delete_keep(sockfd);
-		close(sockfd);
-		if(keptalive) {
-			//now that we've deleted the keepalive we came from, retry the request
-			//hopefully it will take the 'no keepalive found' path...and not infinite loop.
-			//which would be bad.
-			char modrefer[1024];
-			strlcpy(modrefer,referer,1024);
-			strlcat(modrefer,"+refetch",1024);
-			if(body) {
-				rewind(body);
-			}
-			return http_request(fspath,verb,etag,modrefer,extraheaders,body);
-		} else {
-			return -1;
-		}
-	}
-
-	return sockfd;
-}
-
-int
-straight_handler(int contentlength,int fdesc,FILE *datafile)
-{
-	int blocklen=65535;
-	int bytes=-1;
-	int bodybytes=0;
-	if(contentlength < 65535) {
-		blocklen=contentlength;
-	}
-	brintf("Blockeln is: %d. File descriptor is: %d\n",blocklen,fdesc);
-	if(blocklen>0) {
-		char *mybuffer=malloc(blocklen);
-		while((bytes = recv(fdesc,mybuffer,blocklen,0))) { //re-use existing buffer
-			if(bytes==-1 && (errno==EAGAIN || errno==EINTR)) {
-				brintf("Recv reported EAGAIN or EINTR\n");
-				continue;
-			}
-			if(bytes<=0) {
-				brintf("Recv returned 0 or -1. FAIL?: cause: %s\n",strerror(errno));
-				return 0; //maybe?!?!!?
-				break;
-			}
-			brintf("okay, we finished with teh stupid eagains. What's going on?\n");
-			fwrite(mybuffer,bytes,1,datafile);
-			bodybytes+=bytes;
-			brintf("Read %d bytes, expecting total of %d, curerently at: %d\n",bytes,contentlength,bodybytes);
-			if(bodybytes>=contentlength) {
-				brintf("Okay, read enough data, bailing out of recv loop. Read: %ld, expecting: %d\n",ftell(datafile),contentlength);
-				free(mybuffer);
-				mybuffer=0;
-				break;
-			}
-			if(contentlength-bodybytes>65535) {
-				blocklen=65535;
-			} else {
-				blocklen=contentlength-bodybytes;
-			}
-		}
-		if (mybuffer) {
-			free(mybuffer);
-		}
-	}
-	return 1;
-}
-
-int
-chunked_handler(int fdesc,FILE *datafile)
-{
-	int fd2=dup(fdesc);
-	FILE *webs=fdopen(fd2,"r");
-	int chunkbytes=-1;
-	if(!webs) {
-		brintf("I could not open webs from file descriptor :%d\n",fdesc);
-	}
-	brintf("Beginning Chunk HAndlings!\n");
-	while(chunkbytes!=0) {
-		char lengthline[16]="";
-		char *badchar=0;
-		if(fgets(lengthline,16,webs)==0) {
-			if(feof(webs))
-				brintf("EOF\n");
-			if(ferror(webs))
-				brintf("FERROR\n");
-			fclose(webs);
-			return 0; //FAIL
-		}
-		chunkbytes=strtoul(lengthline,&badchar,16);
-		brintf("Starting a chunk, lengthline is: '%s', numerically that's: %d And 'badchar' portion of string is: '%s', badchar strlen is: %d, [%hhd,%hhd]\n",
-			lengthline,chunkbytes,badchar,strlen(badchar),badchar[0],badchar[1]);
-			
-		if(badchar==lengthline) {
-			brintf("We handled NOTHING. This shit is TOTALLY MESSED UP\n");
-			brintf("chunked - we expected a size, and got something that wouldn't parse at all\n");
-			brintf("we should exit, but why don't we continue instead and read another line for fun?\n");
-			chunkbytes=-1;
-			continue;
-		}
-		
-		int readbytes=0;
-		char *buffer=malloc(chunkbytes);
-		while(readbytes<chunkbytes) {
-			int bytes=fread(buffer,1,chunkbytes,webs);
-			int writtenbytes=fwrite(buffer,1,chunkbytes,datafile);
-			brintf("Reading some bytes for this chunk, wanted %d, got %d\n",chunkbytes,bytes);
-			//decrement some bytes...
-			if(bytes!=writtenbytes) {
-				brintf("ERROR - wrote fewr bytes than we read!!!!! read: %d, wrote: %d\n",bytes,writtenbytes);
-			}
-			readbytes+=bytes;
-			if(readbytes==chunkbytes) {
-				brintf("YAY! end of chunk!");
-				char crlf[2];
-				int r=fread(crlf,1,2,webs); (void)r;
-				if(crlf[0]!='\r' || crlf[1]!='\n') {
-					brintf("CRLF fail! We expected CRLF (\\r \\n, 13 10), and got (%hhd %hhd). read said: %d\n",crlf[0],crlf[1],r);
-				}
-				chunkbytes=-1;
-			}
-		}
-		free(buffer);
-	}
-	fclose(webs);
-	return 1;
-}
-
-void
-wastebody(char *selectedverb,int mysocket,char *received_headers)
-{
-	if(strcasecmp(selectedverb,"HEAD")==0) {
-		//All responses to the HEAD Method MUST NOT include a message body...
-		return;
-	}
-	int httpstatus=fetchstatus(received_headers);
-	if((httpstatus>=100 && httpstatus <200) || httpstatus==204 || httpstatus==304) {
-		//All 1xx, 204, and 304 responses MUST NOT include a message-body..
-		return;
-	} else {
-		FILE *waster=fopen("/dev/null","w");
-		char transferencoding[1024];
-		fetchheader(received_headers,"transfer-encoding",transferencoding,1024);
-		if(strncasecmp(transferencoding,"chunked",1024)==0) {
-			chunked_handler(mysocket,waster);
-		} else {
-			char contentlength[1024];
-			fetchheader(received_headers,"content-length",contentlength,1024);
-			straight_handler(strtol(contentlength,0,10),mysocket,waster);
-		}
-		fclose(waster);
-	}
-}
 
 #include <utime.h>
 #include <sys/stat.h>
@@ -626,7 +218,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	char selectedverb[80];
 	FILE *headerfile=0;
 	char etag[256]="";
-	int mysocket=-1;
+	httpsocket mysocket;
 	char *slashlessmetaprepend=0;
 	int dirmode=0;
 	int dontuseetags=0;
@@ -838,20 +430,13 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	
 	//brintf("Http request returned socket: %d\n",mysocket);
 	
-	if(mysocket > 0) {
+	if(http_valid(mysocket)) {
 		char *received_headers=0;
-		if(recv_headers(mysocket,&received_headers)) {
-			char connection[1024]="";
+		if(recv_headers(&mysocket,&received_headers)) {
 			char crestheader[1024]="";
 			FILE *datafile=0;
 
 			brintf("Here's the headers, btw: %s\n",received_headers);
-
-			fetchheader(received_headers,"Connection",connection,1024);
-			if(strcasecmp(connection,"close")==0) {
-				brintf("HTTP/1.1 pipeline connection CLOSED, yanking from list.");
-				delete_keep(mysocket);
-			}
 
 			//special case for speed - on a 304, the headers probably haven't changed
 			//so don't rewrite them (fast fast!)
@@ -882,10 +467,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				brintf("Bout to dont_fclose\n");
 				dont_fclose(headerfile); // RELEASE LOCK
 				free(received_headers);
-				if(strcasecmp(connection,"close")==0)
-					close(mysocket);
 				free(headerbuf);
-				return_keep(mysocket);
+				http_close(&mysocket);
 				brintf("Ready to return..\n");
 				return datafile;
 			}
@@ -897,14 +480,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				brintf("Busted headers are: %s\n",received_headers);
 			} else {
 				int truncatestatus=0;
-				char contentlength[1024]="";
 				char location[1024]="";
 				char dn[1024];
 				char tempfile[1024];
-				int readlen=-1;
 				int tmpfd=-1;
-				char trancode[1024];
-				int chunked=0;
 				/* problems with the anti-starbucksing protocol - need to handle redirects and 404's
 					without at least the 404 handling, you can't negatively-cache nonexistent files.
 				*/
@@ -935,11 +514,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				//return the file buffer
 				//write the remnants of the recv'ed header...
 				//brintf("HTTP Header is: %d\n",fetchstatus(received_headers));
-				fetchheader(received_headers,"content-length",contentlength,1024);
-				fetchheader(received_headers,"transfer-encoding",trancode,1024);
-				chunked=(strncasecmp(trancode,"chunked",1024)==0);
 				//brintf("Content length is: %s\n",contentlength);
-				readlen=atoi(contentlength);
 
 				switch(fetchstatus(received_headers)) {
 					case 200:
@@ -950,9 +525,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						free(received_headers);
 						brintf("DUDE TOTALLY SUCKY!!!! Somebody HEAD'ed a resource and we had to unlink its data file.\n");
 						unlink(cachefilebase);
-						if(strcasecmp(connection,"close")==0)
-							close(mysocket);
-						return_keep(mysocket);
+						http_close(&mysocket);
 						free(headerbuf);
 						return 0;// NO CONTENTS TO DEAL WITH HERE!
 					}
@@ -968,12 +541,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						brintf("Cannot open datafile for some reason?: %s",strerror(errno));
 					}
 					
-					if(chunked) {
-						chunked_handler(mysocket,datafile);
-					} else {
-						straight_handler(readlen,mysocket,datafile);
-					}
-					
+					contents_handler(mysocket,datafile);
 					if(rename(tempfile,cachefilebase)) {
 						brintf("Could not rename file to %s because: %s\n",cachefilebase,strerror(errno));
 					}
@@ -989,10 +557,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					}
 					dont_fclose(headerfile); //RELEASE LOCK
 					free(received_headers);
-					if(strcasecmp(connection,"close")==0)
-						close(mysocket);
 					free(headerbuf);
-					return_keep(mysocket);
+					http_close(&mysocket);
 					return datafile;
 					break;
 
@@ -1005,7 +571,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					//IF NOT! Treat as symlink(?!). Write headers to headerfile. return no data (or empty file?)
 					//NB. Requires a change to readlink()
 					//there is NO datafile to work with here, but we don't return 0...how's that gonna work?
-					wastebody(selectedverb,mysocket,received_headers);
+					wastebody(mysocket);
 
 					fetchheader(received_headers,"location",location,1024);
 					if(strcmp(location,"")!=0 && location[strlen(location)-1]=='/') {
@@ -1018,13 +584,11 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 									//and besides, it's just going to say '301', which isn't helpful
 						dont_fclose(headerfile);
 						free(received_headers);
-						if(strcasecmp(connection,"close")==0)
-							close(mysocket);
 						char modpurpose[1024];
 						strlcpy(modpurpose,purpose,1024);
 						strlcat(modpurpose,"+directoryrefetch",1024);
 						free(headerbuf);
-						return_keep(mysocket);
+						http_close(&mysocket);
 						//TEMP WORKAROUND FIX FOR POSSIBLE BUG ISOLATION STUFF?!
 						//delete_keep(mysocket);
 						//close(mysocket);
@@ -1035,10 +599,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					brintf("Not a directory, treating as symlink...\n");
 					dont_fclose(headerfile); //release lock
 					free(received_headers);
-					if(strcasecmp(connection,"close")==0)
-						close(mysocket);
 					free(headerbuf);
-					return_keep(mysocket);
+					http_close(&mysocket);
 					return 0; //do we return a filepointer to an empty file or 0? NOT SURE!
 					break;
 
@@ -1049,7 +611,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 
 					//be prepared to drop a 404 cachefile! This will prevent repeated requests for nonexistent entities
 					if(dirmode) {
-						wastebody(selectedverb,mysocket,received_headers);
+						wastebody(mysocket);
 						//we 404'ed (or 403'ed) in dirmode. Shit.
 						char headerdirname[1024];
 						brintf("Directory mode resulted in 404. Retrying as regular file...\n");
@@ -1060,13 +622,11 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						strncat(headerdirname,path,1024);
 						rmdir(headerdirname);
 						brintf("I should be yanking directories %s and %s\n",path+1,headerdirname);
-						if(strcasecmp(connection,"close")==0)
-							close(mysocket);
 						free(received_headers);
 						char modpurpose[1024];
 						strlcpy(modpurpose,purpose,1024);
 						strlcat(modpurpose,"+plainrefetch",1024);
-						return_keep(mysocket);
+						http_close(&mysocket);
 						free(headerbuf);
 						if (headerfile) dont_fclose(headerfile); //need this?! release lock?
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode);
@@ -1076,26 +636,23 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 
 					case 403: //forbidden
 					case 401: //requires authentication
-					wastebody(selectedverb,mysocket,received_headers);
+					wastebody(mysocket);
 					brintf("404/403/401 mode, I *may* be closing the cache header file...\n");
 					if(headerfile) {
 						brintf(" Results: %d\n",dont_fclose(headerfile)); //Need to release locks on 404's too! //BAD
 					} else {
 						brintf(" No headerfile to close\n");
 					}
-					if(strcasecmp(connection,"close")==0)
-						close(mysocket);
 					free(received_headers);
-					return_keep(mysocket);
+					http_close(&mysocket);
 					free(headerbuf);
 					return 0; //nonexistent file, return 0, hold on to cache, no datafile exists.
 					break;
 
 					default:
 					brintf("Unknown HTTP status (%d): %s\n",fetchstatus(received_headers),received_headers);
-					close(mysocket);
+					http_close(&mysocket); //SOMETHING HARSHER HERE PERHAPS?!
 					//return_keep(mysocket);
-					delete_keep(mysocket);
 					free(received_headers);
 					free(headerbuf);
 					if(headerfile) {
@@ -1105,8 +662,6 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					break;
 				} //end switch on http status
 			} //end 'else' clause about whether we have CREST headers or not
-			if(strcasecmp(connection,"close")==0)
-				close(mysocket);
 		} //end if clause as to whether we got a valid response on recv_headers
 		brintf("Past block for receiving data, strerror says: %s\n",strerror(errno));
 		free(received_headers);
@@ -1143,6 +698,6 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	dont_fclose(headerfile); //RELEASE LOCK!
 	brintf("dont_fclose'd headerfile\n");
 	brintf("About to return data file: %p\n",staledata);
-	return_keep(mysocket);
+	http_close(&mysocket);
 	return staledata;
 }

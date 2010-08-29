@@ -10,6 +10,7 @@
 #include <sys/time.h>
 
 #include "common.h"
+#include "http.h"
 
 #include <crypt.h>
 
@@ -653,16 +654,16 @@ putting_routine(void *unused __attribute__((unused)))
 			
 			//http_request(char *fspath,char *verb,char *etag, char *referer,char *extraheaders,FILE *body)
 			brintf("Our link target for today is: %s\n",linktarget+2);
-			int fd=http_request(linktarget+2,"PUT",0,"putting_routine",headerplus,contentfile);
+			httpsocket fd=http_request(linktarget+2,"PUT",0,"putting_routine",headerplus,contentfile);
 			fclose(contentfile);
 			free(headerplus);
-			if(fd<=0) {
+			if(!http_valid(fd)) {
 				brintf("Seriously weird problem with http_request, going for next iteration in loop...(%s)\n",strerror(errno));
 				//free(headerpointer); //no, dickweed, this hasn't been allocated yet.
 				fclose(metafile);
 				continue;
 			}
-			recv_headers(fd,&headerpointer);
+			recv_headers(&fd,&headerpointer);
 			
 			int status=fetchstatus(headerpointer);
 			
@@ -697,8 +698,8 @@ putting_routine(void *unused __attribute__((unused)))
 
 				//then readback headers, write them to headerfile, 
 				//close(fd); //stop that!!!!
-				wastebody("PUT",fd,headerpointer);
-				return_keep(fd);
+				wastebody(fd);
+				http_close(&fd);
 				unlink(linkname);//now that we're done, toss the symlink
 				free(headerpointer);
 	
@@ -716,9 +717,9 @@ putting_routine(void *unused __attribute__((unused)))
 				brintf("Status isn't in the 200 range I'm expecting: %d\n",status);
 				brintf("Headers for fail are: %s\n",headerpointer);
 				//close(fd); //goddammit! Stop that rude garbage!
-				wastebody("PUT",fd,headerpointer);
+				wastebody(fd);
 				free(headerpointer);
-				return_keep(fd);
+				http_close(&fd);
 				fclose(metafile);
 			}
 			
@@ -726,35 +727,6 @@ putting_routine(void *unused __attribute__((unused)))
 		sleep(10);
 		closedir(pendingdir);
 	}
-	return 0;
-}
-
-#include <sys/socket.h>
-#include <errno.h>
-
-int 
-recv_headers(int mysocket,char **headerpointer/* ,void **bodypiece */)
-{
-	int mydesc=dup(mysocket);
-	brintf("My socket is: %d, we duped that to %d. I *PROMISE* to close it, here in-function.\n",mysocket,mydesc);
-	FILE *web=fdopen(mydesc,"r");
-	setvbuf(web,0,_IONBF,0);
-	int bytesofheader=0;
-	*headerpointer=calloc(1,1); //init to \0
-	int i=0;
-	while(i++<100) {
-		char linebuf[1024]="";
-		fgets(linebuf,1024,web);
-		bytesofheader+=strlen(linebuf);
-		brintf("header line[%d]: strlen is %d, header is: %d, line is :%s",i,strlen(linebuf),bytesofheader,linebuf);
-		*headerpointer=realloc(*headerpointer,bytesofheader+1);
-		strcat(*headerpointer,linebuf);
-		if(strcmp(linebuf,"\r\n")==0) {
-			fclose(web);
-			return 1;
-		}
-	}
-	fclose(web);
 	return 0;
 }
 

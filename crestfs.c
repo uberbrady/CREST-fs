@@ -25,6 +25,7 @@
 
 #include "resource.h"
 #include "common.h"
+#include "http.h"
 
 #include <pthread.h>
 
@@ -579,16 +580,17 @@ crest_unlink(const char *path)
 	int unl=unlink(putpath); //if this fails, that's fine.
 	brintf("Unlink of possible put file? %d\n",unl);
 
-	int pointless=http_request(path,"DELETE",0,"unlink",0,0);
-	if(pointless<=0) {
+	httpsocket pointless=http_request(path,"DELETE",0,"unlink",0,0);
+	if(!http_valid(pointless)) {
 		fclose(metafile);
 		return -EAGAIN;
 	}
 	char *resultheaders=0;
-	recv_headers(pointless,&resultheaders);
-	wastebody("DELETE",pointless,resultheaders);
+	recv_headers(&pointless,&resultheaders);
+	wastebody(pointless);
+	
+	http_close(&pointless);
 
-	return_keep(pointless);
 	if((resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) <300)|| unl==0) {
 		invalidate_parents(path);
 		free(resultheaders);
@@ -611,14 +613,14 @@ crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 	char *resultheaders=0;
 	strlcpy(dirpath,path,1024);
 	strlcat(dirpath,"/",1024);
-	int dontcare=http_request(dirpath,"PUT",0,"mkdir",0,0);
-	if(dontcare<=0) {
+	httpsocket dontcare=http_request(dirpath,"PUT",0,"mkdir",0,0);
+	if(!http_valid(dontcare)) {
 		return -EAGAIN;
 	}
-	recv_headers(dontcare,&resultheaders);
-	wastebody("PUT",dontcare,resultheaders); //we may have received a body, get rid.
+	recv_headers(&dontcare,&resultheaders);
+	wastebody(dontcare); //we may have received a body, get rid.
 	//close(dontcare); //no, that's poor manners.
-	return_keep(dontcare); //that's nicer.
+	http_close(&dontcare); //that's nicer.
 	if(resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) < 300) {
 		free(resultheaders);
 		append_parents(path);
@@ -665,16 +667,16 @@ crest_symlink(const char *link, const char *path)
 	FILE *f=fmemopen((void *)link,strlen(link),"r"); //this used to be ...(newtarget,strlen(newtarget)...)
 	char clen[1024];
 	snprintf(clen,1024,"Content-length: %d",strlen(link)); //also used to be strlen(netwraget)
-	int wha=http_request(path,"POST",0,"symlink",clen,f);
+	httpsocket wha=http_request(path,"POST",0,"symlink",clen,f);
 	fclose(f);
-	if(wha<=0) {
+	if(!http_valid(wha)) {
 		return -EAGAIN;
 	}
 	char *headers=0;
-	recv_headers(wha,&headers);
-	wastebody("POST",wha,headers);
+	recv_headers(&wha,&headers);
+	wastebody(wha);
 	//close(wha); //How rude!
-	return_keep(wha);
+	http_close(&wha);
 	if(fetchstatus(headers)>=200 && fetchstatus(headers)<300) {
 		free(headers);
 		//symlink(newtarget,path); //let the caching handle this till we start doing stuff async

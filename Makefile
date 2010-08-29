@@ -31,37 +31,43 @@ memtest: crestfs.memtest
 
 
 	
-crestfs.static: Makefile crestfs.static.o resource.static.o common.static.o
-	$(gcc) $(SILENCE) -g $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o resource.static.o common.static.o libfuse.a -lpthread -ldl -lcrypt
+crestfs.static: Makefile crestfs.static.o resource.static.o common.static.o http.static.o
+	$(gcc) $(SILENCE) -g $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o resource.static.o common.static.o http.static.o libfuse.a -lpthread -ldl -lcrypt
 
-crestfs.static.o: crestfs.c Makefile common.h
+crestfs.static.o: crestfs.c Makefile common.h http.h
 	$(gcc) $(SILENCE) -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o crestfs.static.o crestfs.c
 
 resource.static.o: resource.c resource.h Makefile common.h
 	$(gcc) $(SILENCE) -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o resource.static.o resource.c
 	
-common.static.o: common.c common.h Makefile
+common.static.o: common.c common.h Makefile http.h
 	$(gcc) $(SILENCE) -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLASG) -o common.static.o common.c
 
+http.static.o: http.c http.h Makefile
+	$(gcc) $(SILENCE) -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLASG) -o http.static.o http.c
 
 
 
 
 
-crestfs.dynamic: crestfs.o resource.o common.o Makefile
+
+crestfs.dynamic: crestfs.o resource.o common.o Makefile http.o
 	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
-	gcc -g -pg -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o -lfuse -lcrypt -lpthread
+	gcc -g -pg -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o http.o -lfuse -lcrypt -lpthread
 	#gcc -static -g -Wall -Werror -o crestfs.static crestfs.o -lfuse
 
-crestfs.o: crestfs.c Makefile
+crestfs.o: crestfs.c Makefile http.h common.h
 	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	gcc $(CFLAGS) $(SILENCE) -pg -Wall -W -Werror -c -o crestfs.o crestfs.c
 	
 resource.o: resource.h resource.c Makefile
 	gcc $(CFLAGS) $(SILENCE) -pg -Wall -W -Werror -c -o resource.o resource.c
 	
-common.o: common.c common.h resource.h Makefile
+common.o: common.c common.h resource.h Makefile http.h
 	gcc $(CFLAGS) $(SILENCE) -pg -Wall -W -Werror -c -o common.o common.c
+	
+http.o: http.c http.h Makefile
+	gcc $(CFLAGS) $(SILENCE) -pg -Wall -W -Werror -c -o http.o http.c
 
 
 

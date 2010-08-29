@@ -37,10 +37,6 @@ extern char authfile[256];
 
 #define TOOMANYFILES 1000
 
-int recv_headers(int fd,char **headerpointer); //http-related? 
-//ALLOCATES headerpointer (fills it), and allocates and fills bodypiece and returns its size
-//bodypiece is a small chunk of the body section
-
 void fetchheader(char *headers,char *name,char *results,int length);//http-related? 
 	
 int fetchstatus(const char *headers);//http-related? 
