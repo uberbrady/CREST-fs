@@ -7,7 +7,8 @@ PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/:/usr/bin/:/bin/:/sb
 gcc=i686-linux-uclibc-gcc
 CFLAGS=-D_FILE_OFFSET_BITS=64 -g -O2
 #only want this for the Static builds, not the regular Dynamic ones.
-SILENCE=-DSHUTUP
+#SILENCE=-DSHUTUP
+# Silly. I just changed the Make rules so this shouldn't have to be messed with anymore. I'm leaving it here anyways.
 SILENCE=
 
 
@@ -32,19 +33,19 @@ memtest: crestfs.memtest
 
 	
 crestfs.static: Makefile crestfs.static.o resource.static.o common.static.o http.static.o
-	$(gcc) $(SILENCE) -g $(CFLAGS) -static -Wall -Werror -o crestfs.static crestfs.static.o resource.static.o common.static.o http.static.o libfuse.a -lpthread -ldl -lcrypt
+	$(gcc) -g $(CFLAGS) -DSHUTUP -static -Wall -Werror -o crestfs.static crestfs.static.o resource.static.o common.static.o http.static.o libfuse.a -lpthread -ldl -lcrypt
 
 crestfs.static.o: crestfs.c Makefile common.h http.h
-	$(gcc) $(SILENCE) -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o crestfs.static.o crestfs.c
+	$(gcc) -DSHUTUP -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o crestfs.static.o crestfs.c
 
 resource.static.o: resource.c resource.h Makefile common.h
-	$(gcc) $(SILENCE) -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o resource.static.o resource.c
+	$(gcc) -DSHUTUP -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLAGS) -o resource.static.o resource.c
 	
 common.static.o: common.c common.h Makefile http.h
-	$(gcc) $(SILENCE) -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLASG) -o common.static.o common.c
+	$(gcc) -DSHUTUP -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLASG) -o common.static.o common.c
 
 http.static.o: http.c http.h Makefile
-	$(gcc) $(SILENCE) -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLASG) -o http.static.o http.c
+	$(gcc) -DSHUTUP -g -Wall -W -Werror -idirafter /usr/include/fuse -c $(CFLASG) -o http.static.o http.c
 
 
 

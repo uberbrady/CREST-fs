@@ -121,6 +121,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 					//brintf("BTW, date I'm trying to format: %s\n",date);
 					//brintf("WEIRD...date: %s, length: %d\n",date,(int)stbuf->st_size);
 					stbuf->st_mtime = parsedate(date);
+					brintf("parsedate: Uh, Date %s parsed to: %d\n",date,(int)stbuf->st_mtime);
 					break;
 					
 					case 301:
@@ -165,6 +166,8 @@ crest_getattr(const char *path, struct stat *stbuf)
 	return 0;
 }
 
+#include <libgen.h> //needed for dirname and friends, used to calculate symlink targets
+
 static int
 crest_readlink(const char *path, char * buf, size_t bufsize)
 {
@@ -188,12 +191,30 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	//from an http://www.domainname.com/path/stuff/whatever
 	//we must get to a local path.
 	if(strncmp(location,"http://",7)!=0) {
-		brintf("Unsupported protocol, or missing 'location' header: %s\n",location);
-		return -ENOENT;
+		//relative symlink. Either relative to _SERVER_ root, or relative to dirname...
+		if(location[0]=='/') {
+			brintf("No absolute directory-relative symlinks yet, sorry\n");
+			return -EIO;
+			strlcpy(buf,rootdir,bufsize); //fs cache 'root'
+			
+		} else if(strlen(location)>0) {
+			strlcpy(buf,rootdir,bufsize); //fs cache 'root'
+			char dn[1024];
+			strlcpy(dn,path,1024);
+			strlcat(buf,dirname(dn),bufsize); //may modify argument, hence the copy
+			strlcat(buf,"/",bufsize);
+			strlcat(buf,location,bufsize);
+			
+		} else {
+			strlcpy(buf,rootdir,bufsize); //fs cache 'root'
+			brintf("Unsupported protocol, or missing 'location' header: %s\n",location);
+			return -ENOENT;
+		}
+	} else {
+		strlcpy(buf,rootdir,bufsize); //fs cache 'root'
+		strlcat(buf,"/",bufsize);
+		strlcat(buf,location+7,bufsize);
 	}
-	strlcpy(buf,rootdir,bufsize); //fs cache 'root'
-	strlcat(buf,"/",bufsize);
-	strlcat(buf,location+7,bufsize);
 	
 	if(cachefile) {
 		brintf("Freaky, got a valid cachefile for a symlink?!\n");
@@ -212,6 +233,8 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 		if(stres==0 && strncmp(linkbuf,buf,1024)==0) {
 			//brintf("Perfect match on symlink! Not doing anything\n");
 			return 0;
+		} else {
+			brintf("Nope, link is badly made, it is currently: %s\n",linkbuf);
 		}
 	}
 	brintf("I will unlink: %s, and point it to: %s\n",path+1,buf);
@@ -543,8 +566,11 @@ crest_mknod(const char*path,mode_t m, dev_t d __attribute__((unused)))
 	}
 	brintf("OK, fine - files created *AND* truncated!\n");
 	
+	//should we be setting a DATE on this file? This would make go away some of our 1/1/1970 problems.
+	//but it may bring us other problems...well, let's jsut try it, we've got the code hanging out.
+	
 	markdirty(path); //path marked dirty so it will get 'put'
-	//faux_freshen_metadata(path); //make my metadata look new but have crappy etags
+	freshen_metadata(path,200,0); //shiny metadata taill the PUT rewrites it
 	append_parents(path); //make it look like I've been appended to my parents directory listings!
 	fclose(data);
 	fclose(meta); //causes unlock
@@ -606,23 +632,80 @@ crest_unlink(const char *path)
 }
 
 static int
+crest_rmdir(const char *path)
+{
+	//unlink path+1
+	char metapath[1024];
+	char slashedpath[1024];
+	
+	strlcpy(slashedpath,path,1024);
+	strlcat(slashedpath,"/",1024);
+	
+	strlcpy(metapath,METAPREPEND,1024);
+	strlcat(metapath,path,1024);
+	strlcat(metapath,DIRCACHEFILE,1024);
+	FILE *metafile=fopenr(metapath+1,"w+");
+	if(!metafile) {
+		brintf("Could not open metafile for %s for deletion, bailing?\n",path);
+		return -EIO;
+	}
+	safe_flock(fileno(metafile),LOCK_EX,metapath+1);
+
+	char hash[23];
+	hashname(path,hash);
+	char putpath[1024];
+	strlcpy(putpath,PENDINGDIR,1024);
+	strlcat(putpath,"/",1024);
+	strlcat(putpath,hash,1024);
+	brintf("The path I would unlink would be: %s\n",putpath);
+	int unl=unlink(putpath); //if this fails, that's fine.
+	brintf("Unlink of possible put file? %d\n",unl);
+
+	httpsocket pointless=http_request(slashedpath,"DELETE",0,"unlink",0,0);
+	if(!http_valid(pointless)) {
+		fclose(metafile);
+		return -EAGAIN;
+	}
+	char *resultheaders=0;
+	recv_headers(&pointless,&resultheaders);
+	wastebody(pointless);
+	
+	http_close(&pointless);
+
+	if((resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) <300)|| unl==0) {
+		//we should toss our DATA-DATA directory (which is going to be getting into other's way)
+		//and our METADATA directory (which will do the same)
+		invalidate_parents(path);
+		free(resultheaders);
+		fclose(metafile);
+		return 0;
+	} else {
+		brintf("FALIURE Unlinking: %s\n",resultheaders);
+		printf("deletion HTTP request failed for %s: %s",path,resultheaders);
+		fclose(metafile);
+		printf("You neither deleted a putable file, nor something off the server.\n");
+		return -EIO;
+	}
+}
+
+static int
 crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 {
 	//THIS SHOULD BE DONE ASYNC INSTEAD! THIS IS WRONG! WILL NOT WORK DISCONNECTEDLY!!!!!!!
 	char dirpath[1024];
-	char *resultheaders=0;
+	//char *resultheaders=0;
 	strlcpy(dirpath,path,1024);
 	strlcat(dirpath,"/",1024);
-	httpsocket dontcare=http_request(dirpath,"PUT",0,"mkdir",0,0);
+	/* httpsocket dontcare=http_request(dirpath,"PUT",0,"mkdir",0,0);
 	if(!http_valid(dontcare)) {
 		return -EAGAIN;
 	}
 	recv_headers(&dontcare,&resultheaders);
 	wastebody(dontcare); //we may have received a body, get rid.
 	//close(dontcare); //no, that's poor manners.
-	http_close(&dontcare); //that's nicer.
+	http_close(&dontcare); //that's nicer. 
 	if(resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) < 300) {
-		free(resultheaders);
+		free(resultheaders); */
 		append_parents(path);
 		//should unlink my own metadeata, no?
 		char mymeta[1024];
@@ -631,11 +714,21 @@ crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 		int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
 		(void)res;
 		brintf("I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
+		res=mkdir(mymeta+1,0700);
+		brintf("Just tried to make my metadata directory %s and got %d\n",mymeta+1,res);
+		res=mkdir(path+1,0700); //boom. Just cut number of HTTP requests in HALF. HALF baby.
+		brintf("And making my directory-directory resulted in: %d, here's the dir we tried to make: %s, and here's errno: %s",
+			res,path+1,strerror(errno));
+		//we are re-using dirpath, above.
+		//it looks like this:      /domainname/dirname/dirname/
+		strlcat(dirpath,DIRCACHEFILE,1024); //so it'll have two slashes. So what. Shut up.
+		freshen_metadata(dirpath,200,0); //make our metadata look nice 'n' fresh!
+		markdirty(path); //make the symlink!
 		return 0;
-	} else {
+/* 	} else {
 		free(resultheaders);
 		return -EACCES;
-	}
+	} */
 }
 
 static int
@@ -664,38 +757,67 @@ crest_symlink(const char *link, const char *path)
 	strlcpy(newtarget,"http://",1024);
 	strlcat(newtarget,resolvedpath+strlen(cachedirname)+2,1024);
 */	//what a mess
-	FILE *f=fmemopen((void *)link,strlen(link),"r"); //this used to be ...(newtarget,strlen(newtarget)...)
-	char clen[1024];
-	snprintf(clen,1024,"Content-length: %d",strlen(link)); //also used to be strlen(netwraget)
-	httpsocket wha=http_request(path,"POST",0,"symlink",clen,f);
-	fclose(f);
-	if(!http_valid(wha)) {
-		return -EAGAIN;
-	}
-	char *headers=0;
-	recv_headers(&wha,&headers);
-	wastebody(wha);
-	//close(wha); //How rude!
-	http_close(&wha);
-	if(fetchstatus(headers)>=200 && fetchstatus(headers)<300) {
-		free(headers);
-		//symlink(newtarget,path); //let the caching handle this till we start doing stuff async
-		append_parents(path);
-		//should unlink my own metadeata, no? COPY-PASE FROM DIRECTORY THING ABOVE
-		char mymeta[1024];
-		strlcpy(mymeta,METAPREPEND,1024);
-		strlcat(mymeta,path,1024);
-		int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
-		(void)res;
-		brintf("(DIRECTORY) I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
-		return 0;
-	} else {
-		if(headers) {
-			free(headers);
+
+	brintf("SYMLINKIN: %s -> %s\n",path+1,link);
+	char locheader[1024]="Location: ";
+	//should unlink my own metadeata, no? COPY-PASE FROM DIRECTORY THING ABOVE
+	if(link[0]=='/') {
+		//absolute symlink, how do we handle this?
+		
+		//there are a few options:
+		
+		// #1) Symlink points to somewhere within same *host* e.g.
+		//	/http/samplehost.com/testfile -> /http/samplehost.com/linktarget
+		//	Translate to:
+		//	Location: /linktarget
+		//	?
+		
+		// #2) Symlink points to somewhere on DIFFERENT host e.g.
+		//	/http/samplehost.com/testfile -> /http/differenthost.com/linktarget
+		//	Translate to:
+		//	Location: http://differenthost.com/linktarget
+		
+		// #3) Symlink points outside of crest-fs - e.g.
+		//	/http/samplehost.com/testfile -> /etc/passwd
+		//	Translate to:
+		//	Location: file:///etc/passwd
+		
+		// Option 3 we will just not permit to start with.
+		
+		// Answer: Wrap up everything in option #2 (which slighly subsumes #1)
+		
+		// For posterity's sake, here's what a relative symlink looks like:
+		// #4) Relative symlink (necessarily points within CREST-fs)
+		//	/http/samplehost.com/testfile -> linktarget
+		//	Translates to:
+		//	Location: linktarget
+		
+		if(strncmp(link,rootdir,strlen(rootdir))!=0 || link[strlen(rootdir)]!='/') {
+			brintf("Can't symlink outside of CREST-fs\n");
+			return -EACCES;
 		}
-		brintf("Failed to make symlink: %s\n",headers);
+		//option 3 is now rejected.
+		
+		strlcat(locheader,"http://",1024);
+		strlcat(locheader,link+strlen(rootdir)+1,1024);
+		brintf("Calulated Location Header is: %s\n",locheader);
+	} else {
+		//relative link? Super easy.
+		strlcat(locheader,link,1024);
+	}
+	int res=symlink(link,path+1); //let the caching handle this till we start doing stuff async
+	if(res==0) {
+		append_parents(path);
+		markdirty(path);
+		freshen_metadata(path,302,locheader); //be prepared to pass Location header over...otherwise these symlinks won't resolve
+		//int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
+		//(void)res;
+		//brintf("(SYMLINK) I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
+	} else {
+		brintf("Failed to make symlink: %s\n",strerror(errno));
 		return -EIO;
 	}
+	return 0;
 }
 
 static struct fuse_operations crest_filesystem_operations = {
@@ -712,6 +834,7 @@ static struct fuse_operations crest_filesystem_operations = {
     .mknod   = crest_mknod,   /* mostly just for creating files     */
 
     .mkdir   = crest_mkdir,   /* what do you think it's for, smart guy? */
+    .rmdir   = crest_rmdir,
 
     .symlink = crest_symlink,
 

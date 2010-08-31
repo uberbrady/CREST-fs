@@ -265,6 +265,7 @@ parsedate(char *datestring)
 	memset(&mytime,0,sizeof(mytime));
 	char *formatto=strptime(datestring,"%a, %e %b %Y %H:%M:%S %Z",&mytime);
 	if(formatto==0) {
+		brintf("NULL pointer of FAIL when trying to parse date: '%s'\n",datestring);
 		return 0;
 	} else {
 		return mktime(&mytime);
@@ -449,25 +450,72 @@ int check_put(const char *path)
 //The blank etag is actually necessary to trigger proper stat's of the written file. UGH.
 
 #include "resource.h" //needed for putting_routine and invalidate_parents
+
+#include <errno.h>
+
+
+	//plain file: 200, Etag ""
+	//plain dir: 200, Etag ""
+	//symlink: 301, Location: Etag,
+	
+	//EVERYBODY HAS: Last-Modified
+	
+	//symlink - I'll want the link target ("Location: ")
+
+	//I can figure out the last-modified pretty easily...for everyone
+	
+	// new Etag will come down? on a succesful putting_routine run?
+	
+	//NOTE! IF the 'path' is to a directory, it's the caller's responsibility to make sure to ask for
+	//the dircache file properly
+
 /*
+	This routine "freshens" the metadata with a synthetic set of HTTP headers.
+	This won't _guarantee_ a lack of a server round-trip - to do that, you'd also need to mark the file as 'PUT'
+	So your synthetic set of headers should be HEAD'able (if you can make 'em that way), and may last for a while
+	esp. if the file gets put right afterwards, and doesn't get changed - yor uheaders will be golden until the file 
+	changes!
+*/
+
+
 void
-faux_freshen_metadata(const char *path) //cleans and silences metadata for reasonable results to stat()'s, possibly before a file's been actually uploaded
+freshen_metadata(const char *path,int mode, char *extraheaders) //cleans and silences metadata for reasonable results to stat()'s, possibly before a file's been actually uploaded
 {
 	char metafilename[1024];
 	strlcpy(metafilename,METAPREPEND,1024);
 	strlcat(metafilename,path,1024);
 	FILE *metafile=fopen(metafilename+1,"w");
 	if(metafile) {
-		int writeres=fwrite(okstring,1,strlen(okstring)+1,metafile);
-		if(writeres !=0) {
-			brintf("rewriting metafile had some problems: write: %d\n",writeres);
+		char httpdate[80];
+		struct tm now;
+		time_t nowtime;
+		nowtime=time(0);
+		localtime_r(&nowtime,&now);
+		strftime(httpdate,80,"%a, %e %b %Y %H:%M:%S %Z",&now);
+		
+		char *okstring=0;
+		char extraheaderlines[8196]="";
+		if(extraheaders && strlen(extraheaders) > 0) {
+			strlcpy(extraheaderlines,extraheaders,8196);
+			strlcat(extraheaderlines,"\r\n\r\n",8196);
+		} else {
+			strlcpy(extraheaderlines,"\r\n",8196);
 		}
+		brintf("Losing my mind: Extra Header Lines: %s\n",extraheaderlines);
+		asprintf(&okstring,"HTTP/1.1 %d Synthetic Header\r\nLast-Modified: %s\r\n%s",mode,httpdate,extraheaderlines);
+		unsigned int writeres=fwrite(okstring,1,strlen(okstring)+1,metafile);
+		brintf("Final Freshened Header to Write: %s\n",okstring);
+		if(writeres != strlen(okstring)+1) {
+			brintf("rewriting metafile had some problems: write: %d, shoulda: %d\n",writeres,strlen(okstring));
+		}
+		free(okstring);
 		fclose(metafile);
 	} else {
-		brintf("Could not open/create metafile for faux-freshen! Silently continuing, I guess?\n");
+		brintf("Could not open/create metafile '%s' for faux-freshen: %s! Silently continuing, I guess?\n",
+			metafilename,strerror(errno));
 	}
 }
-*/
+
 #include <libgen.h> //for dirname()
 
 ///this function will prolly end up deprecated...
@@ -555,7 +603,6 @@ append_parents(const char *origpath)
 }
 
 #include <sys/file.h> //for flock params.
-#include <errno.h>
 
 int safe_flock(int filenum,int lockmode,char *filename)
 {
@@ -585,6 +632,171 @@ return 0;
 
 #define IDLETIME 10
 
+int
+handle_hash(char *name)
+{
+	char *headerpointer=0;
+	char linkname[1024];
+	strlcpy(linkname,PENDINGDIR,1024);
+	strlcat(linkname,"/",1024);
+	strlcat(linkname,name,1024);
+	char linktarget[1024];
+	int s=-1;
+	s=readlink(linkname,linktarget,1024);
+	if(s==-1) {
+		return -1; //not able to read link
+	}
+	linktarget[s]='\0';
+	brintf("Look! I found this one: %s -> %s\n",name,linktarget);
+	//OK! Now check all the directory components and make sure they're "handled"
+	char pathmangler[1024];
+	strcpy(pathmangler,linktarget+2);
+	char *slashpointer;
+	char hash[23];
+	slashpointer=pathmangler+1;
+	while((slashpointer=strchr(slashpointer,'/'))){
+		brintf("strchar returns: %s\n",slashpointer);
+		slashpointer[0]='\0';
+		brintf("Tmp string is: %s\n",pathmangler);
+		hashname(pathmangler,hash);
+		int res=handle_hash(hash); //try to handle component
+		if(res==0) {
+			brintf("Handled a Hash!\n");
+		} else {
+			brintf("Nothing to handle...\n");
+		}
+		slashpointer[0]='/';
+		slashpointer++;
+	}
+	//lock the metadata file, PUT the results, and close the lock (opened FILE *)
+	char metafilename[1024];
+	strlcpy(metafilename,METAPREPEND,1024);
+	strlcat(metafilename,linktarget+2,1024);
+
+	struct stat st;
+	brintf("about to stat: %s\n",linktarget+3);
+	if(lstat(linktarget+3,&st)!=0) {
+		brintf("Couldn't stat our file! Going to next iteration of loop\n");
+		return -1;
+	}
+	int sleeptime=10;
+	int fileage=time(0) - st.st_mtime;
+	brintf("Checking if File has been around long enough - IDLETIME is: %d, file age is %d, old sleep time was: %d, new sleep time might be: %d\n",
+		IDLETIME,fileage,sleeptime,IDLETIME-fileage);
+	if( fileage < IDLETIME) {
+		brintf("No it has NOT\n");
+		if((IDLETIME - fileage) >0 && (IDLETIME - fileage) <sleeptime) {
+			sleeptime=IDLETIME-fileage;
+		}
+		return -1;
+	} else {
+		brintf("File is old enough, continue processing it\n");
+	}
+	
+	if(S_ISDIR(st.st_mode)) {
+		strlcat(metafilename,DIRCACHEFILE,1024);
+	}
+
+	FILE *metafile=fopen(metafilename+1,"r+");
+	int lck=-1;
+	if(metafile) {
+		lck=safe_flock(fileno(metafile),LOCK_EX,metafilename+1);
+	} else {
+		brintf("Weird - cannot open metafile, means we can't scribble write status to it later. Let's bail this iteration\n");
+		return -1;
+	}
+	brintf("We are going to try to open metafile: %s. results: %p. lockstatus: %d\n",metafilename+1,metafile,lck);
+	FILE *contentfile;
+	char *headerplus;
+	char *httpmethod="PUT";
+	char link[1024]="";
+	if(S_ISDIR(st.st_mode)) {
+		//directory?
+		brintf("DIRECTORY MODE!\n");
+		contentfile=fopen("/dev/null","r"); //or should it be zero? I like the content length... I guess...
+		asprintf(&headerplus,"Content-length: 0");
+		strlcat(linktarget,"/",1024);
+	} else if (S_ISLNK(st.st_mode)) {
+		brintf("LINK MODE!!!!\n");
+		char metaheaders[65535];
+		fread(metaheaders,1,65535,metafile);
+		fetchheader(metaheaders,"Location",link,1024);
+		//int s=readlink(linktarget+3,link,1024);
+		if(metaheaders[0]=='\0') {
+			brintf("Couldn't read the Location Header: '%s', because of: %s",linktarget+3,strerror(errno));
+			brintf("Metaheaders: %s\n",metaheaders);
+			return -1;
+		}
+		brintf("Discovered link is: %s\n",link);
+		contentfile=fmemopen((void *)link,strlen(link),"r"); //this used to be ...(newtarget,strlen(newtarget)...)
+		asprintf(&headerplus,"Content-length: %d",strlen(link)); //also used to be strlen(netwraget)
+		httpmethod="POST";
+	} else {
+		//plain file?
+		contentfile=fopen(linktarget+3,"r");
+		asprintf(&headerplus,"Content-length: %d",(int)st.st_size);
+	}
+	brintf("Content file is: %s (%p)\n",linktarget+3,contentfile);
+	
+	//http_request(char *fspath,char *verb,char *etag, char *referer,char *extraheaders,FILE *body)
+	brintf("Our link target for today is: %s\n",linktarget+2);
+	httpsocket fd=http_request(linktarget+2,httpmethod,0,"putting_routine",headerplus,contentfile);
+	fclose(contentfile);
+	free(headerplus);
+	if(!http_valid(fd)) {
+		brintf("Seriously weird problem with http_request, going for next iteration in loop...(%s)\n",strerror(errno));
+		//free(headerpointer); //no, dickweed, this hasn't been allocated yet.
+		fclose(metafile);
+		return -1;
+	}
+	recv_headers(&fd,&headerpointer);
+	
+	int status=fetchstatus(headerpointer);
+	
+	if(status==200 || status==201 || status==204) {
+		char etag[1024]="";
+		char sanitized_headers[8192]="";
+		//THIS MANUAL HEADER MANGLING BUSINESS *MUST* STOP!
+		//we have a nice routine for this now - freshen_metadata. 
+		//use that.
+		brintf("RECEIVED HEADERS SAY: %s\n",headerpointer);
+		fetchheader(headerpointer,"etag",etag,1024);
+		if(strlen(etag)>0) { 
+			strlcat(sanitized_headers,"Etag: ",8192);
+			strlcat(sanitized_headers,etag,8192);
+			strlcat(sanitized_headers,"\r\n",8192);
+		}
+		int metastatus=200;
+		if(S_ISLNK(st.st_mode)) {
+			strlcat(sanitized_headers,"Location: ",8192);
+			strlcat(sanitized_headers,link,8192);
+			metastatus=302;
+		}
+		freshen_metadata(linktarget+2,metastatus,sanitized_headers);
+
+		wastebody(fd);
+		http_close(&fd);
+		unlink(linkname);//now that we're done, toss the symlink
+		free(headerpointer);
+		
+		//We don't need to mess with parental-invalidation, or anything like that - you handle that the moment
+		//you *write* the request
+
+		fclose(metafile);//unlock, end transaction
+		return 0;
+	} else {
+		brintf("Status isn't in the 200 range I'm expecting: %d\n",status);
+		brintf("Headers for fail are: %s\n",headerpointer);
+		//close(fd); //goddammit! Stop that rude garbage!
+		wastebody(fd);
+		free(headerpointer);
+		http_close(&fd);
+		fclose(metafile);
+		return -1;
+	}
+}
+
+
 void *
 putting_routine(void *unused __attribute__((unused)))
 {
@@ -599,130 +811,16 @@ putting_routine(void *unused __attribute__((unused)))
 			sleep(10);
 			continue;
 		}
-		int sleeptime=10;
 		while(readdir_r(pendingdir,&mydirent,&dp)==0) {
 			if(dp==0) {
 				brintf("End of directory?\n");
 				break;
 			}
-			char *headerpointer=0;
+			brintf("Uh, checking name: %s\n",dp->d_name);
 			if(strcmp(dp->d_name,".")==0 || strcmp(dp->d_name,"..")==0) {
 				continue;
 			}
-			char linkname[1024];
-			strlcpy(linkname,PENDINGDIR,1024);
-			strlcat(linkname,"/",1024);
-			strlcat(linkname,dp->d_name,1024);
-			char linktarget[1024];
-			int s=-1;
-			s=readlink(linkname,linktarget,1024);
-			linktarget[s]='\0';
-			brintf("Look! I found this one: %s -> %s\n",dp->d_name,linktarget);
-			//lock the metadata file, PUT the results, and close the lock (opened FILE *)
-			char metafilename[1024];
-			strlcpy(metafilename,METAPREPEND,1024);
-			strlcat(metafilename,linktarget+2,1024);
-
-			struct stat st;
-			if(stat(linkname,&st)!=0) {
-				brintf("Couldn't stat our file! Going to next iteration of loop\n");
-				continue;
-			}
-			int fileage=time(0) - st.st_mtime;
-			brintf("Checking if File has been around long enough - IDLETIME is: %d, file age is %d, old sleep time was: %d, new sleep time might be: %d\n",
-				IDLETIME,fileage,sleeptime,IDLETIME-fileage);
-			if( fileage < IDLETIME) {
-				brintf("No it has NOT\n");
-				if((IDLETIME - fileage) >0 && (IDLETIME - fileage) <sleeptime) {
-					sleeptime=IDLETIME-fileage;
-				}
-				continue;
-			} else {
-				brintf("File is old enough, continue processing it\n");
-			}
-
-			FILE *metafile=fopen(metafilename+1,"r+");
-			int lck=-1;
-			if(metafile) {
-				lck=safe_flock(fileno(metafile),LOCK_EX,metafilename+1);
-			}
-			brintf("We are going to try to open metafile: %s. results: %p. lockstatus: %d\n",metafilename+1,metafile,lck);
-			FILE *contentfile=fopen(linktarget+3,"r");
-			brintf("Content file is: %s (%p)\n",linktarget+3,contentfile);
-			char *headerplus;
-			asprintf(&headerplus,"Content-length: %d",(int)st.st_size);
-			
-			//http_request(char *fspath,char *verb,char *etag, char *referer,char *extraheaders,FILE *body)
-			brintf("Our link target for today is: %s\n",linktarget+2);
-			httpsocket fd=http_request(linktarget+2,"PUT",0,"putting_routine",headerplus,contentfile);
-			fclose(contentfile);
-			free(headerplus);
-			if(!http_valid(fd)) {
-				brintf("Seriously weird problem with http_request, going for next iteration in loop...(%s)\n",strerror(errno));
-				//free(headerpointer); //no, dickweed, this hasn't been allocated yet.
-				fclose(metafile);
-				continue;
-			}
-			recv_headers(&fd,&headerpointer);
-			
-			int status=fetchstatus(headerpointer);
-			
-			if(status==200 || status==201 || status==204) {
-				char etag[1024]="";
-				char sanitized_headers[8192]="";
-				ftruncate(fileno(metafile),0);
-				brintf("RECEIVED HEADERS SAY: %s\n",headerpointer);
-				fetchheader(headerpointer,"etag",etag,1024);
-				snprintf(sanitized_headers,8192,"HTTP/1.0 %d Synthetic Header\r\n",fetchstatus(headerpointer));
-				if(strlen(etag)>0) { 
-					strlcat(sanitized_headers,"Etag: ",8192);
-					strlcat(sanitized_headers,etag,8192);
-					strlcat(sanitized_headers,"\r\n",8192);
-				}
-				
-				strlcat(sanitized_headers,"Last-Modified: ",8192);
-				char httpdate[80];
-				struct tm now;
-				time_t nowtime;
-				nowtime=time(0);
-				localtime_r(&nowtime,&now);
-				strftime(httpdate,80,"%a %e %b %Y %H:%M:%S %Z",&now);
-				strlcat(sanitized_headers, httpdate, 8192);
-				strlcat(sanitized_headers,"\r\n",8192);
-				
-				strlcat(sanitized_headers,"\r\n",8192);
-				fputs(sanitized_headers,metafile);
-				fputc('\0',metafile);
-				//fputs(headerpointer,metafile);
-				
-
-				//then readback headers, write them to headerfile, 
-				//close(fd); //stop that!!!!
-				wastebody(fd);
-				http_close(&fd);
-				unlink(linkname);//now that we're done, toss the symlink
-				free(headerpointer);
-	
-				//need to invalidate parent directory's cached info (as it shall no longer be valid)
-				//append_parents(linktarget+2); //that's the fuse-related path (with leading forward-slash) for the file we just put.
-				//Wait, wait, wait - I did the 'append-parents' deal already when I created teh file (so that parental directory listsings would work)
-				//so I don't need to do that again, nor do I need to freshen that directory listing - It's fine if it gets refreshed x seconds
-				//after the initial append_parents call, that's fine. Well, not *completely* - what if the file hasn't been put up yet?
-				//that could be an issue. It *should* get put up, but what if it's big and takes longer than x seconds? Could happen!
-				//the short answer is "I dunno" and the longer answer is "When I do all-async-always, it'll be fixed."
-				//FIXME
-				
-				fclose(metafile);//unlock, end transaction
-			} else {
-				brintf("Status isn't in the 200 range I'm expecting: %d\n",status);
-				brintf("Headers for fail are: %s\n",headerpointer);
-				//close(fd); //goddammit! Stop that rude garbage!
-				wastebody(fd);
-				free(headerpointer);
-				http_close(&fd);
-				fclose(metafile);
-			}
-			
+			handle_hash(dp->d_name);
 		}
 		sleep(10);
 		closedir(pendingdir);

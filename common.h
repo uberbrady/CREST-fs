@@ -59,7 +59,8 @@ void invalidate_parents(const char *path); //cache-related, belongs in resource
 
 void append_parents(const char *path); //definitely cache related (similar to above)
 
-//void faux_freshen_metadata(const char *path); //cache-related, also resource? 
+void freshen_metadata(const char *path,int mode, char *extraheaders); //cache-related, also resource? 
+						//specifically, newly created directories use this
 
 void *putting_routine(void *unused); //no clue where this should go. maybe crestfs?
 

@@ -199,8 +199,6 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 	}
 }
 
-char *okstring="HTTP/1.1 200 OK\r\nEtag: \"\"\r\n\r\n";
-
 int dont_fclose(FILE *f)
 {
 	brintf("actually fclosing File: %p\n",f);
@@ -338,29 +336,20 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				already 'upgraded' the selectedverb to GET. Yeah, that sounds good?
 			*/
 			
-			/* translation of this 'if' statement:
-				Either - 
-					you're doing a 'HEAD' - OR
-					the status isn't 2xx or 304 (or 302?)
-					-OR you can open the file
-					
-			*/
-			if(has_file_been_PUT) {
-				//pseudo up the headers for a put file
-				strncpy(headerbuf,okstring,65535);
-			}
 			brintf("COMPLICATED QUESTION: verb: %s, status: %d\n",selectedverb,fetchstatus(headerbuf));
 			
 			/* problem - this is *not* using cached data for HEAD's that don't return files - 
-			e.g. - I stat() a file without grabbing it. That causes a HEAD
+			e.g. - I stat() a file without grabbing it. That causes a HEAD.
 			I don't ever fetch the file. Later, I stat() it again. That result should be cached
 			But it isn't (because there's no file-file behind it).
 			*/
 			
-			if(strcmp(selectedverb,"GET")==0 || //if you asked for a GET, or
-				(fetchstatus(headerbuf)>=200 && fetchstatus(headerbuf)<=299) ||  //you got a 200 series code...
-				fetchstatus(headerbuf)==304 || //or a 304 etag-match message...  
-				has_file_been_PUT ) //or file was recently PUT
+			int mystatus=fetchstatus(headerbuf);
+			if(!S_ISLNK(cachestat.st_mode) && ( // NEVER open a symlink... AND....
+				strcmp(selectedverb,"GET")==0 || //if you asked for a GET, or
+				(mystatus>=200 && mystatus<=299) ||  //you got a 200 series code...
+				mystatus==304 || //or a 304 etag-match message...  
+				has_file_been_PUT))   //or file was recently PUT
 			{
 				//THEN you need a real live file pointer returned to you
 				tmp=fopen(cachefilebase,cachefilemode);
