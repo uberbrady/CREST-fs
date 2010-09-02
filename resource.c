@@ -563,7 +563,17 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					wastebody(mysocket);
 
 					fetchheader(received_headers,"location",location,1024);
-					if(strcmp(location,"")!=0 && location[strlen(location)-1]=='/') {
+					
+					if( (strncmp(location,"/",1)==0 && //Host-relative url (starting with '/')
+						strncmp(location,pathpart,strlen(pathpart))==0 && 
+						strlen(location)==strlen(pathpart)+1 &&
+						location[strlen(location)-1]=='/'
+					      ) || 
+					      (	strncmp(location,"http://",7)==0 &&  //absolute URL
+						strncmp(location+7,path,strlen(path))==0 && 
+						strlen(location+7)==strlen(path)+1 && 
+						location[strlen(location)-1]=='/')) 
+					{
 						brintf("Location discovered to be: %s, assuming DIRECTORY and rerunning!\n",location);
 						//assume this must be a 'directory', but we requested it as if it were a 'file' - rerun!
 						redirmake(cachefilebase); //make enough of a path to hold what will go here
@@ -582,6 +592,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						//delete_keep(mysocket);
 						//close(mysocket);
 						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode);
+					} else {
+						brintf("We are thinking this is a symlink. location: %s, pathpart: %s, strlen(loc): %d, strlen(pathpart): %d",location,pathpart,strlen(location),strlen(pathpart));
 					}
 					//otherwise (no slash at end of location path), we must be a plain, boring symlink or some such.
 					//yawn.

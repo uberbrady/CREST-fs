@@ -185,8 +185,15 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 			struct timeval to;
 			memset(&to,0,sizeof(to));
 			to.tv_sec = 3;
-			setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
-			setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
+			to.tv_usec= 0;
+			if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to))) {
+				perror("Could not set RECEIVE timeout");
+				abort();
+			}
+			if(setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to))) {
+				perror("Could not set SEND timeout?");
+				abort();
+			}
 
 			if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 				close(sockfd);
@@ -372,12 +379,13 @@ recv_headers(httpsocket *mysocket,char **headerpointer/* ,void **bodypiece */)
 			fetchheader(*headerpointer,"connection",headerval,1024);
 			mysocket->closed=(strcasecmp(headerval,"close")==0) ;
 			mysocket->status=fetchstatus(*headerpointer);
-			fetchheader(*headerpointer,"content-transfer-encoding",headerval,1024);
+			fetchheader(*headerpointer,"transfer-encoding",headerval,1024);
 			if(strcasecmp(headerval,"chunked")==0) {
 				mysocket->encoding=chunked;
 			} else {
 				mysocket->encoding=regular;
 			}
+			brintf("Detected Xfer Encoding: %s, translating to: %d\n",headerval,mysocket->encoding);
 			fetchheader(*headerpointer,"content-length",headerval,1024);
 			mysocket->contentlength=atol(headerval);
 			
@@ -498,6 +506,7 @@ chunked_handler(httpsocket fdesc,FILE *datafile)
 int
 contents_handler(httpsocket mysocket,FILE *fp)
 {
+	brintf("About to 'handle' contents. Here's what we know. Headed?: %d Status: %d, encoding: %d\n",mysocket.headed,mysocket.status,mysocket.encoding);
 	if(mysocket.headed) {
 		//All responses to the HEAD Method MUST NOT include a message body...
 		return -1;
@@ -509,6 +518,7 @@ contents_handler(httpsocket mysocket,FILE *fp)
 	} else {
 		switch(mysocket.encoding) {
 			case chunked:
+			brintf("Handlin' chunked, baby!\n");
 			chunked_handler(mysocket,fp);
 			return 0;
 			break;
@@ -519,7 +529,7 @@ contents_handler(httpsocket mysocket,FILE *fp)
 			break;
 			
 			default:
-			brintf("UNKNOWN CONTENT ENCODING! Can't waste it!");
+			brintf("UNKNOWN CONTENT ENCODING! Can't handle it!");
 		}
 	}
 	return -1;

@@ -691,44 +691,37 @@ crest_rmdir(const char *path)
 static int
 crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 {
-	//THIS SHOULD BE DONE ASYNC INSTEAD! THIS IS WRONG! WILL NOT WORK DISCONNECTEDLY!!!!!!!
 	char dirpath[1024];
 	//char *resultheaders=0;
 	strlcpy(dirpath,path,1024);
 	strlcat(dirpath,"/",1024);
-	/* httpsocket dontcare=http_request(dirpath,"PUT",0,"mkdir",0,0);
-	if(!http_valid(dontcare)) {
-		return -EAGAIN;
+	append_parents(path);
+	//should unlink my own metadeata, no?
+	char mymeta[1024];
+	strlcpy(mymeta,METAPREPEND,1024);
+	strlcat(mymeta,path,1024);
+	int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
+	(void)res;
+	brintf("I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
+	res=mkdir(mymeta+1,0700);
+	brintf("Just tried to make my metadata directory %s and got %d\n",mymeta+1,res);
+	res=mkdir(path+1,0700); //boom. Just cut number of HTTP requests in HALF. HALF baby.
+	brintf("And making my directory-directory resulted in: %d, here's the dir we tried to make: %s, and here's errno: %s",
+		res,path+1,strerror(errno));
+	//we are re-using dirpath, above.
+	//it looks like this:      /domainname/dirname/dirname/
+	strlcat(dirpath,DIRCACHEFILE,1024); //so it'll have two slashes. So what. Shut up.
+	freshen_metadata(dirpath,200,0); //make our metadata look nice 'n' fresh!
+	//need a directory *contents* file (size zero is fine)
+	FILE *dircache=0;
+	if((dircache=fopen(dirpath+1,"w"))) {
+		brintf("Made the file cache, closing it\n");
+		fclose(dircache);
+	} else {
+		brintf("Failed to make a de dir cache, sad: Filename: %s\n",dirpath+1);
 	}
-	recv_headers(&dontcare,&resultheaders);
-	wastebody(dontcare); //we may have received a body, get rid.
-	//close(dontcare); //no, that's poor manners.
-	http_close(&dontcare); //that's nicer. 
-	if(resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) < 300) {
-		free(resultheaders); */
-		append_parents(path);
-		//should unlink my own metadeata, no?
-		char mymeta[1024];
-		strlcpy(mymeta,METAPREPEND,1024);
-		strlcat(mymeta,path,1024);
-		int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
-		(void)res;
-		brintf("I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
-		res=mkdir(mymeta+1,0700);
-		brintf("Just tried to make my metadata directory %s and got %d\n",mymeta+1,res);
-		res=mkdir(path+1,0700); //boom. Just cut number of HTTP requests in HALF. HALF baby.
-		brintf("And making my directory-directory resulted in: %d, here's the dir we tried to make: %s, and here's errno: %s",
-			res,path+1,strerror(errno));
-		//we are re-using dirpath, above.
-		//it looks like this:      /domainname/dirname/dirname/
-		strlcat(dirpath,DIRCACHEFILE,1024); //so it'll have two slashes. So what. Shut up.
-		freshen_metadata(dirpath,200,0); //make our metadata look nice 'n' fresh!
-		markdirty(path); //make the symlink!
-		return 0;
-/* 	} else {
-		free(resultheaders);
-		return -EACCES;
-	} */
+	markdirty(path); //make the symlink!
+	return 0;
 }
 
 static int
