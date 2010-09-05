@@ -52,6 +52,8 @@ static int
 crest_getattr(const char *path, struct stat *stbuf)
 {
 	char header[HEADERLEN]="";
+	
+	memset(stbuf,0,sizeof(struct stat)); //just to be on the safe side?
 
 	if (strcmp(path, "/") == 0) { /* The root directory of our file system. */
 		stbuf->st_mode = S_IFDIR | 0755;
@@ -113,6 +115,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 								brintf("Can't seek to end of file! WTF!\n");
 								exit(88); //Errr....yeah, all bets are off if taht happens
 							}
+							brintf("getattr:seeked to: %ld\n",ftell(cachefile));
 							stbuf->st_size= ftell(cachefile);
 						}
 					}
@@ -492,6 +495,8 @@ crest_init(struct fuse_conn_info *conn __attribute__((unused)) )
 	brintf("I'm not intending to do anything with this connection: %p\n",conn);
 	fchdir(cachedir);
 	close(cachedir);
+	//I dunno, flock or some shit here?! Beats me.
+	// I would love to catch if I have to crestfs's running
 	
 	if(strcmp(authfile,"/dev/null")!=0) {
 		printf("Creating write thread...\n");
@@ -618,7 +623,7 @@ crest_unlink(const char *path)
 	http_close(&pointless);
 
 	if((resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) <300)|| unl==0) {
-		invalidate_parents(path);
+		delete_from_parents(path);
 		free(resultheaders);
 		fclose(metafile);
 		return 0;
@@ -660,6 +665,14 @@ crest_rmdir(const char *path)
 	brintf("The path I would unlink would be: %s\n",putpath);
 	int unl=unlink(putpath); //if this fails, that's fine.
 	brintf("Unlink of possible put file? %d\n",unl);
+	
+	char penddir[1024];
+	strlcpy(penddir,DIRUPLOADS,1024);
+	strlcat(penddir,"/",1024);
+	strlcat(penddir,hash,1024);
+	int dunl=unlink(penddir);
+	(void)dunl;
+	brintf("Unlinked pending-directory file: %s: results: %d\n",penddir,dunl);
 
 	httpsocket pointless=http_request(slashedpath,"DELETE",0,"unlink",0,0);
 	if(!http_valid(pointless)) {
@@ -675,7 +688,7 @@ crest_rmdir(const char *path)
 	if((resultheaders && fetchstatus(resultheaders) >=200 && fetchstatus(resultheaders) <300)|| unl==0) {
 		//we should toss our DATA-DATA directory (which is going to be getting into other's way)
 		//and our METADATA directory (which will do the same)
-		invalidate_parents(path);
+		delete_from_parents(path);
 		free(resultheaders);
 		fclose(metafile);
 		return 0;
@@ -711,7 +724,9 @@ crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 	//we are re-using dirpath, above.
 	//it looks like this:      /domainname/dirname/dirname/
 	strlcat(dirpath,DIRCACHEFILE,1024); //so it'll have two slashes. So what. Shut up.
-	freshen_metadata(dirpath,200,0); //make our metadata look nice 'n' fresh!
+	freshen_metadata(dirpath,200,"Content-type: x.vnd.bespin-corp/directory-manifest");
+		 //make our metadata look nice 'n' fresh!
+		 //optimistically hope for directory manifest, we can fail back to text/html pretty easily
 	//need a directory *contents* file (size zero is fine)
 	FILE *dircache=0;
 	if((dircache=fopen(dirpath+1,"w"))) {
@@ -814,7 +829,7 @@ crest_symlink(const char *link, const char *path)
 }
 
 static struct fuse_operations crest_filesystem_operations = {
-    .init    = crest_init,    /* mostly to keep access to cache     */
+    .init    = crest_init,    /* mostly to keep access to cache, and initialize the putting_routine()     */
     .getattr = crest_getattr, /* To provide size, permissions, etc. */
     .readlink= crest_readlink,/* to handle funny server redirects */
     .open    = crest_open,    /* To enforce read-only access.       */
@@ -837,10 +852,6 @@ static struct fuse_operations crest_filesystem_operations = {
     
     .unlink = crest_unlink,
 /*
-    .mkdir = PUT (fuck MKCOL. fuck DAV. PUT with a slash at the end. M'k?)
-    .unlink = (delete?)
-    .rmdir = (still delete?)
-    .symlink = (POST)
     .rename = MOVE - not liking new verbs today. maybe not. maybe DELETE followed by PUT
     .statfs - would be nice but I don't know how that would work....
     .flush??????????

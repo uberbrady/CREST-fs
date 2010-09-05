@@ -39,13 +39,18 @@ Hey, I don't want The Whole Web, I just want *my* server. (server.com/sampledir/
 	ln -s mymountpoint/server.com/sampledir/ justmyserver # to have a 'justmyserver' "directory" which points to your server's directory
 	
 What features does it have?
-	(NEW) Directory Manifest support speeds access to all files
-	(NEW) Read-write access to a personal subtree of the filesystem.
-	(NEW) Cache-time is mount-time configurable with a command-line option - the amount of time that a resource will *always* be considered 'fresh' for, without requesting the resource from the web again. Interesting values for this are 60 as a reasonable default, and 2^31-1 (2147483647) as a near 'infinite' value (which means resources will only be grabbed once, then never requested again. Well, not for 1600 years, at least.).
-	(NEW) User-Agent header is now "CREST-fs/1.0"
+	(NEW) File deletions use clever cache manipulations to avoid server round-trips, and extraneous (and sometimes even deadly) cache invalidations - but ONLY on 'manifest'-style directories.
+	(NEW) Support for new leaf-chunking algorithm for writable filesystem - in manifest directories only, some etags may be blank, but etag matches on directories imply the CONTENTS (recursively!) of those directories are unchanged. This should really help performance a LOT.
+	(NEW) File and directory creation are done asynchronously, speeding up apparent speed.
+	(NEW) Symlinks to files and directories should work. Different type of HTTP Location: headers should be respected
+	(NEW) All of the HTTP protocol stuff has been put into one file. Switching to a select() loop will be much easier soon.
+	Directory Manifest support speeds access to all files
+	Read-write access to a personal subtree of the filesystem.
+	Cache-time is mount-time configurable with a command-line option - the amount of time that a resource will *always* be considered 'fresh' for, without requesting the resource from the web again. Interesting values for this are 60 as a reasonable default, and 2^31-1 (2147483647) as a near 'infinite' value (which means resources will only be grabbed once, then never requested again. Well, not for 1600 years, at least.).
+	User-Agent header is now "CREST-fs/1.0"
 	Threading support is in and seems to work OK.
 	Anti-HotSpot pollution - since you're treating REST resources from the Web as actual files, when you go into a Starbucks and use their Wifi, every page you ask for gives you a redirect to a login page. Those redirects would normally be parsed as symlinks and could completely destroy your filesystem. Now, all filesystem-level 200's, 404's and 30x-series redirects require a special header to be set - "X-Bespin-Crest:" - it can be set to anything for now (the production server uses the word 'yes'), but will eventually be some kind of digital signature. This unfortunately makes using a stock Apache install far more difficult than it should be.
-	HTTP/1.1 pipelining support is built and has improved performance dramatically.
+	HTTP/1.1 keepalive support is built and has improved performance dramatically.
 	
 	etags on directory listings will be respected (so later directory listings don't require another full GET)
 
@@ -75,9 +80,13 @@ What features does it have?
 BUGS
 	The Anti-HotSpot Pollution system requires a lot of poking around at Apache to get working.
 	Unexpected conditions in the cache directories will crash the filesystem.
-	If you don't run crestfs in debug mode (-d) - it will hang for some bizarre reason.
+	If you don't run crestfs in debug mode (-d) - sometimes it will hang for some bizarre reason.
 	Directory listings can't be larger than 1MB
 	Some of the static buffers are probably too small for practical use
 	The Makefile is horrible and needs to probably be set up with 'autoconf' or something like it
 	Magic numbers are used more than they should be, and this is Naughty.
-	Symlinks to directories probably don't work.
+	Disconnecting/reconnecting network access tends to screw everything up
+	DNS lookups are obnoxious, but whaddyagonnado?
+	DELETEs are still synchronous, and thus sluggish.
+	Massive file copies can put 20000 files (I've seen 50k) in the .crestfs_pending_writes directory, which is pretty untenable
+	HTTP connections are *not* pipelined, they're just kept-alive - and this heavily slows down creation of many small files

@@ -184,7 +184,7 @@ fetchheader(char *headers,char *name,char *results,int length)
 												//we may need to change this out for \n in case we have invalid servers
 												//out there somewhere...
 		if(lineending==0) {
-			brintf("Couldn't find a CRLF pair, bailing out of fetchheader()!\n");
+			brintf("Couldn't find a CRLF pair, bailing out of fetchheader()! Headers were: %s\n",headers);
 			break;
 		}
 		//brintf("SEARCHING FROM: CHARACTERS: %c %c %c %c %c\n",cursor[0],cursor[1],cursor[2],cursor[3],cursor[4]);
@@ -281,15 +281,18 @@ rootauthurl()
 {
 	if(strcmp(_staticauthfile,"")!=0) {
 		//cache this, but we have no invalidation method yet. This is going to change though.
+		brintf("Auth returning static auth file: %s\n",_staticauthfile);
 		return _staticauthfile;
 	}
 	FILE *authfp=fopen(authfile,"r");
 	if(!authfp) {
+		brintf("Couldn't open auth file, return 0 for now\n");
 		return 0; //no authfile at all
 	}
 	fgets(_staticauthfile,1024,authfp);
 	if(strlen(_staticauthfile)>1) {
 		//just start by assuming there's a newline at the end of that.
+		brintf("Static Auth file getting filled! %s\n",_staticauthfile);
 		_staticauthfile[strlen(_staticauthfile)-1]='\0';
 		fgets(_userpass,1024,authfp);
 		_userpass[strlen(_userpass)-1]='\0';
@@ -298,7 +301,7 @@ rootauthurl()
 		if(_userpass[strlen(_userpass)-1]=='\n') {
 			_userpass[strlen(_userpass)-1]='\0';
 		}
-	}
+	} 
 	fclose(authfp);
 	return _staticauthfile;
 }
@@ -415,6 +418,9 @@ fill_authorization(const char *path,char *authstring,int authlen)
 
 #include <unistd.h>
 #include <sys/stat.h>
+#include <libgen.h> //for dirname()
+#include <errno.h>
+
 
 void 
 markdirty(const char *filename)
@@ -431,6 +437,31 @@ markdirty(const char *filename)
 	strlcpy(mangledfilename,"..",1024);
 	strlcat(mangledfilename,filename,1024);
 	symlink(mangledfilename,pendplace);
+	
+	//hardlink to metadata of parent directory
+	//prevents refetching of directories who have pending writes.
+	char dirplace[1024];
+	strlcpy(dirplace,DIRUPLOADS,1024); // ".crestfs_dirblah"
+	strlcat(dirplace,"/",1024);	//".crestfs_dirblah/"
+	strlcat(dirplace,hash,1024);	//".crestfs_dirblah/01cb9f21"
+
+	char dirnamer[1024];
+	strlcpy(dirnamer,filename,1024);
+	char *mydirname=dirname(dirnamer); //dirname mangles filename :(
+	
+	char metadatafilename[1024];
+	strlcpy(metadatafilename,METAPREPEND,1024); // ".crestfs_blah..."
+	strlcat(metadatafilename,mydirname,1024); // ".crestfs_blah/hostname/dirname"
+	strlcat(metadatafilename,DIRCACHEFILE,1024); // ".crestfs_blah/hostname/dirname/.crestfs_foo_blargh"
+
+	mkdir(DIRUPLOADS,0700);
+	
+	int linkresults=link(metadatafilename+1,dirplace); //can fail if file exists, don't care.
+	if(linkresults) {
+		brintf("Problem creating directory pending hardlink: metadatafilename: %s, dirplace: %s, linkresults: %d, error: %s\n",metadatafilename+1,dirplace,linkresults,strerror(errno));
+	} else {
+		brintf("hardlink ok?: %s, %s\n",metadatafilename,dirplace);
+	}
 }
 
 int check_put(const char *path)
@@ -445,14 +476,6 @@ int check_put(const char *path)
 	brintf("I am checking path: %s for path: %s\n",putpath,path);
 	return (lstat(putpath,&dontcare)==0);
 }
-
-//char *okstring="HTTP/1.1 200 OK\r\nEtag: \"\"\r\n\r\n";
-//The blank etag is actually necessary to trigger proper stat's of the written file. UGH.
-
-#include "resource.h" //needed for putting_routine and invalidate_parents
-
-#include <errno.h>
-
 
 	//plain file: 200, Etag ""
 	//plain dir: 200, Etag ""
@@ -516,16 +539,23 @@ freshen_metadata(const char *path,int mode, char *extraheaders) //cleans and sil
 	}
 }
 
-#include <libgen.h> //for dirname()
+void scribble_directory_iterator(directory_iterator *iter,char *etags); //perhaps consider 'filename' too? Meh...
+//this function's a little private, we don't want just anyone scribbling all over directories.
 
-///this function will prolly end up deprecated...
+#include <utime.h>
+
 void
-invalidate_parents(const char *origpath)
+delete_from_parents(const char *origpath)
 {
 	char path[1024];
 	strncpy(path,origpath,1024);
 	char * basepath=dirname((char *)path+1);
+	
+	char pathcopy[1024];
+	strncpy(pathcopy,origpath,1024);
+	char *shortname=basename(pathcopy); //non-reentrant?!! CAREFUL
 	char parentdir[1024];
+	char filename[1024];
 	strncpy(parentdir,basepath,1024);
 	strncat(parentdir,DIRCACHEFILE,1024);
 
@@ -533,17 +563,31 @@ invalidate_parents(const char *origpath)
 	strncpy(parentmetadir,METAPREPEND,1024);
 	strncat(parentmetadir,"/",1024);
 	strncat(parentmetadir,parentdir,1024);
-
-	int pd=unlink(parentdir); //the actual listing...
-	(void)pd;
-	int pdm=unlink(parentmetadir+1); //the metadata about the listing
-	(void)pdm;
-	brintf("I tried to unlink some parentals for cache-invalidation - parentdir itself (%s) got me: %d; parentmetadir (%s) got: %d\n",
-		parentdir,pd,parentmetadir+1,pdm);
-	//cached directory now invalidated	
+	char headers[8196];
+	FILE *metaheader=fopen(parentmetadir+1,"r");
+	if(!metaheader) {
+		brintf("Couldn't open metadirectory %s for delete_from_parents - bailing out\n",parentmetadir+1);
+		return;
+	}
+	fread(headers,1,8196,metaheader);
+	fclose(metaheader);
+	
+	directory_iterator findit;
+	FILE *dirfile=fopen(parentdir,"r+"); //going to scribble on it!
+	init_directory_iterator(&findit,headers,dirfile);
+	while(directory_iterate(&findit,filename,1024,0,0)) {
+		if(strcmp(filename,shortname)==0) {
+			//somehwo use the directory iterator to 'scribble'?
+			//the filepointer is actually pointing AFTER our entry...
+			scribble_directory_iterator(&findit,0);
+			utime(parentmetadir+1,0); //freshen up the metafile for the parent directory so we don't round-trip
+			free_directory_iterator(&findit);
+			return;
+		}
+	}
+	free_directory_iterator(&findit);
+	brintf("Could not find child entry for %s, silently continuing...\n",shortname);
 }
-
-#include <utime.h>
 
 void 
 append_parents(const char *origpath)
@@ -585,9 +629,11 @@ append_parents(const char *origpath)
 			fputs(appendme,p);
 			fputs("</a>\n",p);
 		} else {
-			fputs("noetags ",p);
+			//md5sum /tmp/empty
+		
+			fputs("d41d8cd98f00b204e9800998ecf8427e ",p); //that's the MD5sum for 'no data'
 			fputs(appendme,p);
-			fputs("\n",p);
+			fputs("\r\n",p);
 		}
 		fclose(p);
 		int pdm=utime(parentmetadir+1,0); //the metadata about the listing.
@@ -629,11 +675,32 @@ return 0;
 
 #include <errno.h>
 
+/*
+
+A basic PUT -
+
+either PUT a file, PUT a directory (MKDIR), or POST a symlink
+
+if intermediate directories are needed, make them FIRST with a recursive call
+
+DELETE's are similar, but the intermediates-handling is different  - sorta the opposite?
+e.g. if hte user said:
+DELETE /a/b/c
+RMDIR /a/b/
+RMDIR /a
+
+We don't want to handle them out of order. If the second one came up first, it would fail, and so would the third
+
+But how do we figure that out? Good question. No idea. I guess you could list the entire pending dir,
+but that would really suck.
+
+*/
 
 #define IDLETIME 10
 
+
 int
-handle_hash(char *name)
+handle_hash_make(char *name)
 {
 	char *headerpointer=0;
 	char linkname[1024];
@@ -655,15 +722,15 @@ handle_hash(char *name)
 	char hash[23];
 	slashpointer=pathmangler+1;
 	while((slashpointer=strchr(slashpointer,'/'))){
-		brintf("strchar returns: %s\n",slashpointer);
+		//brintf("strchar returns: %s\n",slashpointer);
 		slashpointer[0]='\0';
-		brintf("Tmp string is: %s\n",pathmangler);
+		brintf("Intermediate directory string is: %s\n",pathmangler);
 		hashname(pathmangler,hash);
-		int res=handle_hash(hash); //try to handle component
+		int res=handle_hash_make(hash); //try to handle component
 		if(res==0) {
-			brintf("Handled a Hash!\n");
+			brintf("Handled intermediate directory %s!\n",pathmangler);
 		} else {
-			brintf("Nothing to handle...\n");
+			//brintf("Nothing to handle...\n");
 		}
 		slashpointer[0]='/';
 		slashpointer++;
@@ -705,7 +772,7 @@ handle_hash(char *name)
 		brintf("Weird - cannot open metafile, means we can't scribble write status to it later. Let's bail this iteration\n");
 		return -1;
 	}
-	brintf("We are going to try to open metafile: %s. results: %p. lockstatus: %d\n",metafilename+1,metafile,lck);
+	brintf("We opened metafile: %s. results: %p. lockstatus: %d\n",metafilename+1,metafile,lck);
 	FILE *contentfile;
 	char *headerplus;
 	char *httpmethod="PUT";
@@ -773,10 +840,18 @@ handle_hash(char *name)
 			metastatus=302;
 		}
 		freshen_metadata(linktarget+2,metastatus,sanitized_headers);
+		//invalidate parent? The etags are almost guaranteed to be different!
 
 		wastebody(fd);
 		http_close(&fd);
+		char pendingfile[1024];
+		strlcpy(pendingfile,DIRUPLOADS,1024);
+		strlcat(pendingfile,"/",1024);
+		strlcat(pendingfile,name,1024);
 		unlink(linkname);//now that we're done, toss the symlink
+		int unlinked=unlink(pendingfile);
+		(void)unlinked;
+		brintf("Unlinking PENDING entry: %s - %d\n",pendingfile,unlinked);
 		free(headerpointer);
 		
 		//We don't need to mess with parental-invalidation, or anything like that - you handle that the moment
@@ -795,7 +870,6 @@ handle_hash(char *name)
 		return -1;
 	}
 }
-
 
 void *
 putting_routine(void *unused __attribute__((unused)))
@@ -820,7 +894,7 @@ putting_routine(void *unused __attribute__((unused)))
 			if(strcmp(dp->d_name,".")==0 || strcmp(dp->d_name,"..")==0) {
 				continue;
 			}
-			handle_hash(dp->d_name);
+			handle_hash_make(dp->d_name);
 		}
 		sleep(10);
 		closedir(pendingdir);
@@ -843,7 +917,7 @@ void
 init_directory_iterator(directory_iterator *iter,const char *headers, FILE *fp) //char *?
 {
 	brintf("Initializing directory iterator\n");
-	if(!initted) {
+	if(!initted) { //static cleverness - teehee!
 		int status=regcomp(&re,DIRREGEX,REG_EXTENDED|REG_ICASE);
 		if(status!=0) {
 			char error[80];
@@ -866,6 +940,7 @@ init_directory_iterator(directory_iterator *iter,const char *headers, FILE *fp) 
 	if(strcasecmp(contenttype,"x-vnd.bespin.corp/directory-manifest")==0) {
 		iter->mode=manifest;
 		iter->iterator.manifestmode.fptr=fp; //be kind, rewind
+		iter->iterator.manifestmode.prevoffset=0;
 	} else {
 		iter->mode=html;
 		iter->iterator.htmlmode.directory_buffer=calloc(DIRBUFFER,1);
@@ -882,6 +957,13 @@ init_directory_iterator(directory_iterator *iter,const char *headers, FILE *fp) 
 	}
 }
 
+typedef enum {
+	state_unknown,
+	state_etag,
+	state_filename
+} parse_states;
+	
+
 int
 directory_iterate(directory_iterator *metaiter,char *buf,int buflen,char *etagbuf,int etaglen)
 {
@@ -889,8 +971,7 @@ directory_iterate(directory_iterator *metaiter,char *buf,int buflen,char *etagbu
 	char hrefname[255];
 	char linkname[255];
 	char *directory=0;
-	char etag[128];
-	char filename[1024];
+	char fileline[2048];
 	switch(metaiter->mode) {
 		case unknown:
 		brintf("Unknown file type (or uninitted directory_iterator?)\n");
@@ -923,15 +1004,90 @@ directory_iterate(directory_iterator *metaiter,char *buf,int buflen,char *etagbu
 		case manifest:
 		//just read another line, split it off, and you're good.
 		//hell, the algorithm may be in use somewhere already
-		while(fscanf(metaiter->iterator.manifestmode.fptr,"%128s %1024[^\r\n]",etag,filename) != EOF) {
-			brintf("ETAG: %s for filename: %s\n",etag,filename);
-			strlcpy(buf,filename,buflen);
-			
-			if(etagbuf!=0 && etaglen!=0) {
-				strlcpy(etagbuf,etag,etaglen);
+		while(!feof(metaiter->iterator.manifestmode.fptr) && !ferror(metaiter->iterator.manifestmode.fptr)) {
+			metaiter->iterator.manifestmode.prevoffset=ftell(metaiter->iterator.manifestmode.fptr);
+			brintf("Set previous offset to: %d",metaiter->iterator.manifestmode.prevoffset);
+			char * fgetsresult=fgets(fileline,2048,metaiter->iterator.manifestmode.fptr);
+			if(fgetsresult) {
+				brintf("Line fgotten: %s",fileline);
+				parse_states state=state_etag;
+				char *lineiter=fileline;
+				char *etagiter=etagbuf;
+				char *filenameiter=buf;
+				while(lineiter) {
+					if(*lineiter==' ') {
+						//brintf("SPACE FOUND\n");
+						if(state==state_etag) {
+							state=state_filename;
+							if(etagiter) {
+								*etagiter='\0';
+								brintf("So we think our etag is: %s\n",etagbuf);
+							}
+							lineiter++;
+							continue;
+						}
+					}
+					if(*lineiter=='\r') {
+						brintf("Carriage Return detected\n");
+						if(*(lineiter+1)=='\n') {
+							//we're done. Break.
+							*filenameiter='\0';
+							brintf("And so was a newline, filename is: %s\n",buf);
+							int is_all_spaces=1;
+							unsigned int i;
+							for(i=0;i<strlen(buf);i++) {
+								if(buf[i]!=' ') {
+									is_all_spaces=0;
+									break;
+								}
+							}
+							if(is_all_spaces) {
+								//RECURSIVE ITERATION - could this get expensive?
+								//in a directory with a BAJILLION deletions?
+								//I FEEL DIRTY!
+								//I'M SO SORRY - WORLD! PLEASE FORGIVE ME!
+								brintf("Filename is all spaces, assuming deleted entry.\n");
+								break;
+							}
+							return 1; //done, and more may exist
+						} else {
+							brintf("Bare carriage return found, BAILING\n");
+							return 0;
+						}
+					}
+					if(*lineiter=='\n') {
+						brintf("Bare Newline (Linefeed) found, BAILO\n");
+						return 0;
+					}
+					if(state==state_etag && etagiter) {
+						*etagiter=*lineiter;
+						etagiter++;
+					}
+					if(state==state_filename) {
+						*filenameiter=*lineiter;
+						filenameiter++;
+					}
+					if(etagiter-etagbuf>etaglen) {
+						*(etagiter-1)='\0';
+						brintf("Etag size too long, FAIL: %s\n",etagbuf);
+						return 0;
+					}
+					if(filenameiter-buf>1024) {
+						*(filenameiter-1)='\0';
+						brintf("Filename is too long, FAIL: %s\n",buf);
+						return 0;
+					}
+					lineiter++;
+				}
+				brintf("WEIRD - got to end of string, somehow...is something truncated? I don't know.\n");
+				brintf("Going to allow getting the next directory entry and hope for the best...\n");
+			} else {
+				brintf("Fgets failed? What does that mean? I'm guessing it means 'done'\n");
+				return 0;
 			}
-			return 1;
-		}
+			brintf("Line gotten without returning, so I guess that means 'try again'...doing so...\n");
+		} 
+		brintf("Either end of file or end or error, done.\n");
 		return 0;
 		break;
 		
@@ -961,6 +1117,42 @@ void free_directory_iterator(directory_iterator *iter)
 		break;
 		
 		default:
+		break;
+	}
+}
+
+void scribble_directory_iterator(directory_iterator *iter,char *etags) //perhaps consider 'filename' too? Meh...
+{
+	int filepos=-1;
+	int length=0;
+	char *writetext=0;
+	switch(iter->mode) {
+		case unknown:
+		brintf("Unknown mode found for scribbling on directory. This is bad. Break\n");
+		break;
+		
+		case html:
+		brintf("Cannot scribble on HTML directories yet! Break!\n");
+		break;
+		
+		case manifest:
+		filepos=ftell(iter->iterator.manifestmode.fptr);
+		length=filepos - iter->iterator.manifestmode.prevoffset -2; //don't scribble on the \r\n !!!
+		brintf("Seeking to filepos: %d, length: %d",iter->iterator.manifestmode.prevoffset,length);
+		if(etags==0) {
+			fseek(iter->iterator.manifestmode.fptr,iter->iterator.manifestmode.prevoffset,SEEK_SET);
+			writetext=malloc(length+1); //don't forget the terminating \0
+			memset(writetext,' ',length);
+			writetext[length]='\0';
+			fwrite(writetext,1,length,iter->iterator.manifestmode.fptr);
+			fseek(iter->iterator.manifestmode.fptr,filepos,SEEK_SET);
+		} else {
+			brintf("Can't yet scribble real etags! Silent Fail!\n");
+		}
+		break;
+		
+		default:
+		brintf("Super freaky - unknown mode: %d for directory_scribbling\n",iter->mode);
 		break;
 	}
 }

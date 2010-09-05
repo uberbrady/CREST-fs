@@ -194,6 +194,22 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 				perror("Could not set SEND timeout?");
 				abort();
 			}
+			
+			struct timeval tget;
+			memset(&tget,0,sizeof(tget));
+			unsigned int sizething=sizeof(tget);
+			if(getsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tget,&sizething)) {
+				perror("Could NOT *GET* receive timeouts");
+				abort();
+			}
+			brintf("Gotten socket options - seconds: %d, usec: %d. Options size: %d (vs sizeof at %d) \n",
+				(int)tget.tv_sec, (int)tget.tv_usec, sizething,sizeof(tget));
+			if(getsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tget,&sizething)) {
+				perror("Could not *GET* send timeouts");
+				abort();
+			}
+			brintf("Gotten socket options - seconds: %d, usec: %d\n. Options size: %d (vs sizeof %d) \n",
+				(int)tget.tv_sec, (int)tget.tv_usec, sizething, sizeof(tget));
 
 			if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 				close(sockfd);

@@ -160,10 +160,14 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 		struct utimbuf stamp;
 		init_directory_iterator(&iter,headers,dirfile);
 		while(directory_iterate(&iter,filename,1024,etag,128)) {
+			if(strlen(etag)==0) {
+				brintf("BLANK etag for filename %s, skipping!\n",filename);
+				continue;
+			}
 			char direlem[2048];
 			snprintf(direlem,2048,"%s%s/%s" ,METAPREPEND,path,filename);
-			if(direlem[strlen(direlem)-1]=='/') {
-				direlem[strlen(direlem)-1]='\0';
+			struct stat typeit;
+			if(lstat(direlem+1,&typeit)==0 && S_ISDIR(typeit.st_mode)) {
 				strncat(direlem,DIRCACHEFILE,2048); //already has a slash in front of it...GRRR
 			}
 			FILE *metafile=fopen(direlem+1,"r"); //lock your damned self you ingrate
@@ -176,16 +180,18 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 				struct stat oldtime;
 				stat(direlem+1,&oldtime);
 				stamp.actime=oldtime.st_atime; //always leave atimes alone! This says nothing about 'access'!
+				int timeresults=-1;
 				if(strcmp(etag,fileetag)==0) {
 					stamp.modtime=time(0); //NOW!
 					brintf("%s UTIMING NEW!\n",filename);
 					//utime(direlem+1,&stamp); //Match! So this file is GOOD as of right now!
-					utime(direlem+1,0);
+					timeresults=utime(direlem+1,0);
 				} else {
 					stamp.modtime=0; //EPOCH! LONG TIME AGO!
 					brintf("%s UTIMING OLD!\n",filename);
-					utime(direlem+1,&stamp); //unmatch! This file is BAD as of right now, set its time BACK!
+					timeresults=utime(direlem+1,&stamp); //unmatch! This file is BAD as of right now, set its time BACK!
 				}
+				brintf("Results of stamping were: %d\n",timeresults);
 			} else {
 				brintf("NO METAFILE I COULD OPEN FOR %s - doing *NOTHING!!!*\n",direlem+1);
 			}
@@ -310,9 +316,11 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		}
 		
 		int has_file_been_PUT=check_put(path);
+		int is_directory_pending_uploads=dirmode & (statbuf.st_nlink>1);
 		brintf("Has the file been PUT? Answer: %d\n",has_file_been_PUT);
+		brintf("Is directory pending for uploads? %d\n",is_directory_pending_uploads);
 		
-		if((time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) || has_file_been_PUT) {
+		if((time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) || has_file_been_PUT || is_directory_pending_uploads) {
 			//our cachefile is recent enough and big enough, or there's been an intervening PUT
 			FILE *tmp=0;
 			/* If your status isn't 200 or 304, OR it actually is, but you can succesfully open your cachefile, 
@@ -336,7 +344,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				already 'upgraded' the selectedverb to GET. Yeah, that sounds good?
 			*/
 			
-			brintf("COMPLICATED QUESTION: verb: %s, status: %d\n",selectedverb,fetchstatus(headerbuf));
+			brintf("NEW CACHE - COMPLICATED QUESTION: verb: %s, status: %d\n",selectedverb,fetchstatus(headerbuf));
 			
 			/* problem - this is *not* using cached data for HEAD's that don't return files - 
 			e.g. - I stat() a file without grabbing it. That causes a HEAD.
@@ -359,6 +367,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						strncpy(headers,headerbuf,headerlength);
 					}
 					dont_fclose(headerfile); //RELEASE LOCK!!!!!
+					if(dirmode) {
+						brintf("FRESHENING OFF OF CACHE HIT! path: %s, headers: %s, ptr: %p\n",path,headerbuf,tmp);
+						directory_freshen(path,headerbuf,tmp);
+					}
 					free(headerbuf);
 					return tmp;
 				} else {
@@ -541,7 +553,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					}
 					rewind(datafile);
 					if(dirmode) {
-						brintf("DIRMODE - FRSHEN!\n");
+						brintf("DIRMODE - FRSHEN %s!\n",path);
 						directory_freshen(path,received_headers,datafile);
 					}
 					dont_fclose(headerfile); //RELEASE LOCK

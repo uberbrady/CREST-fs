@@ -9,7 +9,11 @@ void brintf(char *format,...) __attribute__ ((format (printf, 1,2)));
 
 #endif
 
+#define METAPREPEND "/.crestfs_metadata_rootnode"
+#define DIRCACHEFILE "/.crestfs_directory_cachenode"
+
 #define PENDINGDIR ".crestfs_pending_writes"
+#define DIRUPLOADS ".crestfs_pending_directories"
 
 int safe_flock(int filenum,int lockmode,char *filename);
 
@@ -55,7 +59,7 @@ void markdirty(const char *filename); //cache-related for sure.
 
 int check_put(const char *path); //cache-related, prolly belongs in resource
 
-void invalidate_parents(const char *path); //cache-related, belongs in resource
+void delete_from_parents(const char *path); //cache-related, belongs in resource
 
 void append_parents(const char *path); //definitely cache related (similar to above)
 
@@ -77,6 +81,7 @@ typedef struct {
 
 typedef struct {
 	FILE *fptr;
+	int prevoffset;
 } manifest_iterator;
 
 typedef union {
