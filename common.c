@@ -450,9 +450,9 @@ markdirty(const char *filename)
 	char *mydirname=dirname(dirnamer); //dirname mangles filename :(
 	
 	char metadatafilename[1024];
-	strlcpy(metadatafilename,METAPREPEND,1024); // ".crestfs_blah..."
-	strlcat(metadatafilename,mydirname,1024); // ".crestfs_blah/hostname/dirname"
-	strlcat(metadatafilename,DIRCACHEFILE,1024); // ".crestfs_blah/hostname/dirname/.crestfs_foo_blargh"
+	strlcpy(metadatafilename,METAPREPEND,1024); // "/.crestfs_blah..."
+	strlcat(metadatafilename,mydirname,1024); // "/.crestfs_blah/hostname/dirname"
+	strlcat(metadatafilename,DIRCACHEFILE,1024); // "/.crestfs_blah/hostname/dirname/.crestfs_foo_blargh"
 
 	mkdir(DIRUPLOADS,0700);
 	
@@ -574,6 +574,9 @@ delete_from_parents(const char *origpath)
 	
 	directory_iterator findit;
 	FILE *dirfile=fopen(parentdir,"r+"); //going to scribble on it!
+	if(!dirfile) {
+		brintf("Could not open dirfile for scribbling, bailing routine\n");
+	}
 	init_directory_iterator(&findit,headers,dirfile);
 	while(directory_iterate(&findit,filename,1024,0,0)) {
 		if(strcmp(filename,shortname)==0) {
@@ -582,11 +585,13 @@ delete_from_parents(const char *origpath)
 			scribble_directory_iterator(&findit,0);
 			utime(parentmetadir+1,0); //freshen up the metafile for the parent directory so we don't round-trip
 			free_directory_iterator(&findit);
+			fclose(dirfile);
 			return;
 		}
 	}
 	free_directory_iterator(&findit);
 	brintf("Could not find child entry for %s, silently continuing...\n",shortname);
+	fclose(dirfile);
 }
 
 void 

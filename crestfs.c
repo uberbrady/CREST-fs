@@ -458,12 +458,12 @@ crest_write(const char *path, const char *buf, size_t size, off_t offset, struct
 	strlcpy(metafilename,METAPREPEND,1024);
 	strlcat(metafilename,"/",1024);
 	strlcat(metafilename,path,1024);
-	FILE *metafile=fopenr(metafilename+1,"w+");
+	FILE *metafile=fopenr(metafilename+1,"r"); //only used for flock() now
 	if(!metafile) {
 		brintf("Couldn't open metafile on behalf of data-write: %s\n",metafilename);
 		return -EIO;
 	}
-	brintf("Uhm, our metafile (for writing) is: %s\n",metafilename+1);
+	brintf("Uhm, our metafile (for reading) is: %s\n",metafilename+1);
 	safe_flock(fileno(metafile),LOCK_EX,metafilename+1); // begin 'transactioney-thing'. EXCLUSIVE LOCK.
 	if(cachefile) {
 		if(fseek(cachefile,offset,SEEK_SET)==0) {
@@ -529,7 +529,25 @@ crest_utime	(const char *p __attribute__((unused)), struct utimbuf *ut __attribu
 static int
 crest_trunc (const char *path, off_t length)
 {
-	return truncate(path+1,length);
+	//I don't need to freshen the metadata...because the file is marked as dirty anyways.
+	//it won't get refreshed
+	int isdirectory=-1;
+	FILE *cachefile=get_resource(path,0,0,&isdirectory,"GET","trunc","r+");
+	if(isdirectory) {
+		return -EISDIR;
+	}
+	if(!cachefile) {
+		return -ENOENT;
+	}
+	markdirty(path);
+	int truncres=ftruncate(fileno(cachefile),length);
+	fclose(cachefile);
+	brintf("Truncate of path: %s (to %d bytes) resulted in: %d - reason: %s",path+1,(int)length,truncres,strerror(errno));
+	if(truncres==0) {
+		return 0;
+	} else {
+		return -EIO;
+	}
 }
 
 /* static int 
@@ -610,6 +628,14 @@ crest_unlink(const char *path)
 	brintf("The path I would unlink would be: %s\n",putpath);
 	int unl=unlink(putpath); //if this fails, that's fine.
 	brintf("Unlink of possible put file? %d\n",unl);
+	
+	char dirplace[1024];
+	strlcpy(dirplace,DIRUPLOADS,1024); // ".crestfs_dirblah"
+	strlcat(dirplace,"/",1024);	//".crestfs_dirblah/"
+	strlcat(dirplace,hash,1024);	//".crestfs_dirblah/01cb9f21"
+	
+	unl=unlink(dirplace);
+	brintf("Unlink of possible put file's pending directory? Name: %s %d\n",dirplace,unl);
 
 	httpsocket pointless=http_request(path,"DELETE",0,"unlink",0,0);
 	if(!http_valid(pointless)) {

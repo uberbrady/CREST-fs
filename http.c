@@ -256,7 +256,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		strlcat(extraheadersbuf,authstring,16384);
 		strlcat(extraheadersbuf,"\r\n",16384);
 	}
-	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/1.0\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,extraheadersbuf);
+	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/1.5\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,extraheadersbuf);
 	brintf("REQUEST: %s\n",reqstr);
 	int sendresults=send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);

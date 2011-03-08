@@ -294,13 +294,13 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	headerfile=fopenr(headerfilename,"r+"); //the cachefile may not exist - we may have just had the 'real' file, or the directory
 						//if so, that's fine, it will parse out as 'too old (1/1/1970)'
 	if(headerfile) {
-		struct stat statbuf;
-		int s=-1;
+		struct stat statbuf; //I feel like this stat needs to happen before the fopenr - FIXME
+		int s=-1;		//if fopenr() created the file, won't stat() make it seem 'new'? FIXME
 		safe_flock(fileno(headerfile),LOCK_SH,headerfilename);
 		s=stat(headerfilename,&statbuf); //assume infallible
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
-		int hdrbytesread=fread(headerbuf,1,65535,headerfile);
-		headerbuf[hdrbytesread+1]='\0';
+		int hdrbytesread=fread(headerbuf,1,65535,headerfile); //and this is big by one? FIXME
+		headerbuf[hdrbytesread+1]='\0'; //I think this is off by one!?!? FIXME
 		//brintf("Headers from cache are: %s, statresults is: %d\n",headerbuf,s);
 		if(!dontuseetags) {
 			//only time we DONT want to use etags is if the original cache entity (the data file)
@@ -344,7 +344,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				already 'upgraded' the selectedverb to GET. Yeah, that sounds good?
 			*/
 			
-			brintf("NEW CACHE - COMPLICATED QUESTION: verb: %s, status: %d\n",selectedverb,fetchstatus(headerbuf));
+			brintf("NEW CACHE - COMPLICATED QUESTION: file: %s verb: %s, status: %d headers: '%s'\n",headerfilename,selectedverb,fetchstatus(headerbuf),headerbuf);
 			
 			/* problem - this is *not* using cached data for HEAD's that don't return files - 
 			e.g. - I stat() a file without grabbing it. That causes a HEAD.
@@ -652,7 +652,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					wastebody(mysocket);
 					brintf("404/403/401 mode, I *may* be closing the cache header file...\n");
 					if(headerfile) {
-						brintf(" Results: %d\n",dont_fclose(headerfile)); //Need to release locks on 404's too! //BAD
+						int closeresults=dont_fclose(headerfile);
+						(void)closeresults;
+						brintf(" Results: %d\n",closeresults); //Need to release locks on 404's too!
 					} else {
 						brintf(" No headerfile to close\n");
 					}
