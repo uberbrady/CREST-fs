@@ -1,5 +1,5 @@
 
-include "Makefile.mac"
+include Makefile.mac
 
 
 CFLAGS=-D_FILE_OFFSET_BITS=64 -O2 -g 
@@ -77,7 +77,7 @@ getresource.o: getresource.c resource.h
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o getresource.o getresource.c
 
 getresource: http.o common.o resource.o getresource.o
-	gcc -g -pg -Wall -W -Werror -o getresource http.o common.o resource.o getresource -l$(FUSELIB) -lpthread
+	gcc -g -pg -Wall -W -Werror -o getresource http.o common.o resource.o getresource.o -l$(FUSELIB) -lpthread
 
 
 test: crestfs.static

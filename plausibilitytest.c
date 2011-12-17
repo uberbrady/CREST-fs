@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "common.h"
 
@@ -21,9 +22,9 @@ char *plauses[]={"Nonexistent","Unknown","Fresh"};
 int main( int argc, char **argv )
 {
 //	int i;
-	if(argc!=3) {
+	if(argc!=4) {
 		printf("Wrong number of args: %d.\n",argc);
-		printf("Usage: %s CACHEAGE /PATH-URL/without/http/leading/it/but/starting/with/slash\n",argv[0]);
+		printf("Usage: %s CACHEAGE CACHEROOT /PATH-URL/without/http/leading/it/but/starting/with/slash\n",argv[0]);
 		exit(1);
 	}
 	maxcacheage=atoi(argv[1]);
@@ -32,7 +33,11 @@ int main( int argc, char **argv )
 	for(i=0;i<argc;i++) {
 		printf("Arg[%d] is: %s\n",i,argv[i]);
 	} */
-	int p=is_plausible_file(argv[2]);
+	char pwd[1024];
+	getcwd(pwd,1024);
+	chdir(argv[2]);
+	int p=is_plausible_file(argv[3]);
+	chdir(pwd);
 	printf("File: %s plausibility: %d [%s]\n",argv[2],p,plauses[p]);
 /*	char headers[65535];
 	int isdir;
