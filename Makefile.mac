@@ -1,0 +1,13 @@
+FUSEINC=/usr/local/include/fuse
+
+FUSELIB=fuse4x
+
+
+gcc=/usr/bin/gcc
+#gcc seems not to be 'predefined' on Mac
+
+ALL: crestfs.dynamic plausibilitytest getresource
+#static builds don't work, only build dynamic
+
+crestfs: crestfs.dynamic
+	cp crestfs.dynamic crestfs

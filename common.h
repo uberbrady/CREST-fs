@@ -9,11 +9,15 @@ void brintf(char *format,...) __attribute__ ((format (printf, 1,2)));
 
 #endif
 
-#define METAPREPEND "/.crestfs_metadata_rootnode"
-#define DIRCACHEFILE "/.crestfs_directory_cachenode"
+#define MANIFESTTYPE "x-vnd.bespin.corp/directory-manifest"
 
-#define PENDINGDIR ".crestfs_pending_writes"
-#define DIRUPLOADS ".crestfs_pending_directories"
+void metafile_for_path(const char *path,char *buffer, int buflen, int isdir);
+
+void datafile_for_path(const char *path,char *buffer, int buflen, int isdir);
+
+void putfile_for_path(const char *path,char*buffer, int buflen);
+
+void putdir_for_path(const char *path,char*buffer,int buflen);
 
 int safe_flock(int filenum,int lockmode,char *filename);
 
@@ -29,6 +33,13 @@ int strlcat(char *dest, const char * src, int size);
 
 int strlcpy(char *dest,const char *src, int size);
 
+#endif
+
+void directoryname(const char *path,char *dirbuf, int dirbufsize,char *basebuf, int basebufsize);
+
+#if defined(__apple__)
+FILE *
+fmemopen(void *buf, size_t size, const char *mode)
 #endif
 
 void redirmake(const char *path);
@@ -67,6 +78,8 @@ void freshen_metadata(const char *path,int mode, char *extraheaders); //cache-re
 						//specifically, newly created directories use this
 
 void *putting_routine(void *unused); //no clue where this should go. maybe crestfs?
+
+void invalidate_metadata(const char *metafile);
 
 // DIRECTORY ITERATION HELPERS
 

@@ -1,0 +1,8 @@
+FUSEINC=/usr/include/fuse
+
+PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/:/usr/bin/:/bin/:/sbin:/usr/sbin
+
+gcc=i686-linux-uclibc-gcc
+
+crestfs: crestfs.static crestfs.dynamic
+	cp crestfs.static crestfs

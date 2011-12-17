@@ -139,7 +139,6 @@ return_keep(int fd)
 
 httpsocket badsock={-1,0,0,0,unknown_encoding,0,0};
 
-
 httpsocket
 http_request(const char *fspath,char *verb,char *etag, char *referer,char *extraheaders,FILE *body)
 {
@@ -154,14 +153,14 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 	
 	//brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
 	
-	brintf("http_request: VERB: %s, URL: %s, referer: %s, extraheaders: %s, body pointer: %p\n",verb,fspath,referer,extraheaders,body);
+	//brintf("http_request: VERB: %s, URL: %s, referer: %s, extraheaders: %s, body pointer: %p\n",verb,fspath,referer,extraheaders,body);
 	start=time(0);
 	//brintf("Getaddrinfo timing test: BEFORE: %ld\n",start);
 	
 	sockfd=find_keep(hostpart);
-	brintf("finished find keep: %d\n",sockfd);
+	//brintf("finished find keep: %d\n",sockfd);
 	if(sockfd==-1) {
-		brintf("Sockfd was -1\n");
+		//brintf("Sockfd was -1\n");
 		int rv;
 		struct addrinfo hints, *servinfo=0, *p=0;
 		memset(&hints, 0, sizeof hints);
@@ -169,17 +168,17 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		hints.ai_socktype = SOCK_STREAM;
 
 		if ((rv = getaddrinfo(hostpart, "80", &hints, &servinfo)) != 0) {
-			brintf("Getaddrinfo timing test: FAIL-AFTER: %ld - couldn't lookup %s because: %s\n",
-				time(0)-start,hostpart,gai_strerror(rv));
+			//brintf("Getaddrinfo timing test: FAIL-AFTER: %ld - couldn't lookup %s because: %s\n",
+			//	time(0)-start,hostpart,gai_strerror(rv));
 			return badsock;
 		}
-		brintf("Got getaddrinfo()...GOOD-AFTER: %ld\n",time(0)-start);
+		//brintf("Got getaddrinfo()...GOOD-AFTER: %ld\n",time(0)-start);
 
 		// loop through all the results and connect to the first we can
 		for(p = servinfo; p != NULL; p = p->ai_next) {
 			if ((sockfd = socket(p->ai_family, p->ai_socktype,
 					p->ai_protocol)) == -1) {
-				perror("client: socket");
+				//perror("client: socket");
 				continue;
 			}
 			struct timeval to;
@@ -202,17 +201,18 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 				perror("Could NOT *GET* receive timeouts");
 				abort();
 			}
-			brintf("Gotten socket options - seconds: %d, usec: %d. Options size: %d (vs sizeof at %d) \n",
-				(int)tget.tv_sec, (int)tget.tv_usec, sizething,sizeof(tget));
+			//brintf("Gotten socket options - seconds: %d, usec: %d. Options size: %d (vs sizeof at %ld) \n",
+			//	(int)tget.tv_sec, (int)tget.tv_usec, sizething,sizeof(tget));
 			if(getsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tget,&sizething)) {
 				perror("Could not *GET* send timeouts");
 				abort();
 			}
-			brintf("Gotten socket options - seconds: %d, usec: %d\n. Options size: %d (vs sizeof %d) \n",
-				(int)tget.tv_sec, (int)tget.tv_usec, sizething, sizeof(tget));
+			//brintf("Gotten socket options - seconds: %d, usec: %d\n. Options size: %d (vs sizeof %ld) \n",
+			//	(int)tget.tv_sec, (int)tget.tv_usec, sizething, sizeof(tget));
 
 			if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
 				close(sockfd);
+				brintf("Path which we couldn't connect to: %s",fspath);
 				perror("client: connect");
 				continue;
 			}
@@ -226,11 +226,11 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 			return badsock;
 		}
 
-		brintf("Okay, connectication has occurenced connect-AFTER: %ld\n",time(0)-start);
+		//brintf("Okay, connectication has occurenced connect-AFTER: %ld\n",time(0)-start);
 		insert_keep(hostpart,sockfd);
 		freeaddrinfo(servinfo); // all done with this structure
 	} else {
-		brintf("Using kept-alive connection... keep-AFTER: %ld\n",time(0)-start);
+		//brintf("Using kept-alive connection... keep-AFTER: %ld\n",time(0)-start);
 		keptalive=1;
 	}
 
@@ -249,18 +249,18 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		strlcat(extraheadersbuf,extraheaders,16384);
 		strlcat(extraheadersbuf,"\r\n",16384);
 	}
-	brintf("Checking to see if authorization is desired for %s: %s\n",fspath,wants_auth(fspath));
+	//brintf("Checking to see if authorization is desired for %s: %s\n",fspath,wants_auth(fspath));
 	if(wants_auth(fspath)) {
 		char authstring[80]="\0";
 		fill_authorization(fspath,authstring,80);
 		strlcat(extraheadersbuf,authstring,16384);
 		strlcat(extraheadersbuf,"\r\n",16384);
 	}
-	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/1.5\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,extraheadersbuf);
-	brintf("REQUEST: %s\n",reqstr);
+	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/1.75\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,extraheadersbuf);
+	//brintf("REQUEST: %s\n",reqstr);
 	int sendresults=send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
-	brintf("from start to SEND-AFTER delay was: %ld\n",time(0)-start);
+	//brintf("from start to SEND-AFTER delay was: %ld\n",time(0)-start);
 	int bodysendresults=1;
 	int totalbytes=0;
 	if(body) {
@@ -271,9 +271,9 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		}
 		if(getsockopt(sockfd,SOL_SOCKET,SO_SNDBUF,&sendsize,&optlength)) {
 			brintf("Couldn't get socket options :( Guessing 1024\n");
-			sendsize=1024;
+			sendsize=65535;
 		}
-		brintf("We are given an entity-body in http_request! Sending it along...(Buffersize: %d)\n",sendsize);
+		//brintf("We are given an entity-body in http_request! Sending it along...(Buffersize: %d)\n",sendsize);
 		char *bodybuf=malloc(sendsize);
 		int bytesread=-1;
 		while(!feof(body) && !ferror(body)) {
@@ -284,16 +284,16 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 			do {
 				sendloop=send(sockfd,bodybuf+bytessent,bytesread-bytessent,0);
 				if(sendloop==-1) {
-					brintf("Error in sending (got -1)...Maybe RETRYING. ERr: %s\n",strerror(errno));
+					//brintf("Error in sending (got -1)...Maybe RETRYING. ERr: %s\n",strerror(errno));
 				} else {
 					bytessent+=sendloop;
 				}
 				if(bytessent!=bytesread) {
-					brintf("A HA!!!!! Read more bytes than we sent. Whoops. Read: %d, Wrote: %d\n",bytesread,bytessent);
+					//brintf("A HA!!!!! Read more bytes than we sent. Whoops. Read: %d, Wrote: %d\n",bytesread,bytessent);
 				}
 			} while((sendloop==-1 && errno==EAGAIN) || (sendloop!=-1 && bytessent<bytesread));
 			if(sendloop==-1) {
-				brintf("Nope, Big fail - sendloop is still negative one, errno must've been not EAGAIN\n");
+				//brintf("Nope, Big fail - sendloop is still negative one, errno must've been not EAGAIN\n");
 				bodysendresults=-1;
 				break; //no need to keep trying to send busted data
 			}
@@ -303,7 +303,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		send(sockfd,"\r\n",2,0); // I can't see why in the spec this is necessary, but it seems to be how it works...
 	}
 	
-	brintf("Sendresults on socket are: %d, keptalive is: %d Total bytes sent: %d\n",sendresults,keptalive,totalbytes);
+	//brintf("Sendresults on socket are: %d, keptalive is: %d Total bytes sent: %d\n",sendresults,keptalive,totalbytes);
 	char peekbuf[8];
 	int peekresults=0;
 	do {
@@ -312,11 +312,11 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 	if(peekresults>0) {
 		//brintf("Buffer peek says: %c%c%c%c\n",peekbuf[0],peekbuf[1],peekbuf[2],peekbuf[3]);
 	} else {
-		brintf("peek failed :(\n");
+		//brintf("peek failed :(\n");
 	}
-	brintf("Recv delay from start - RECV-AFTER was: %ld\n",time(0)-start);
+	//brintf("Recv delay from start - RECV-AFTER was: %ld\n",time(0)-start);
 	if(sendresults<=0 || peekresults<=0 || bodysendresults<=0) {
-		brintf("Bad socket?! BELETING! sendresults: %d, peekresults: %d bodysendresults: %d(Reason: %s)\n",sendresults,peekresults,bodysendresults,strerror(errno));
+		//brintf("Bad socket?! BELETING! sendresults: %d, peekresults: %d bodysendresults: %d(Reason: %s)\n",sendresults,peekresults,bodysendresults,strerror(errno));
 		//either we GOT this from the keepalive pool, or we INSERTED it into the pool - either way, pull it out now!!!
 		delete_keep(sockfd);
 		close(sockfd);
@@ -377,8 +377,12 @@ int
 recv_headers(httpsocket *mysocket,char **headerpointer/* ,void **bodypiece */)
 {
 	int mydesc=dup(mysocket->fd);
-	brintf("My socket is: %d, we duped that to %d. I *PROMISE* to close it, here in-function.\n",mysocket->fd,mydesc);
+	//brintf("My socket is: %d, we duped that to %d. I *PROMISE* to close it, here in-function.\n",mysocket->fd,mydesc);
 	FILE *web=fdopen(mydesc,"r");
+	if(!web) {
+		brintf("COULD NOT OPEN FILE!\n");
+		exit(99); //I *have* to exit - I literally do NOT know what I can do here. Gotta exit. Sorry.
+	}
 	setvbuf(web,0,_IONBF,0);
 	int bytesofheader=0;
 	*headerpointer=calloc(1,1); //init to \0
@@ -387,7 +391,7 @@ recv_headers(httpsocket *mysocket,char **headerpointer/* ,void **bodypiece */)
 		char linebuf[1024]="";
 		fgets(linebuf,1024,web);
 		bytesofheader+=strlen(linebuf);
-		brintf("header line[%d]: strlen is %d, header is: %d, line is :%s",i,strlen(linebuf),bytesofheader,linebuf);
+		//brintf("header line[%d]: strlen is %zd, header is: %d, line is :%s",i,strlen(linebuf),bytesofheader,linebuf);
 		*headerpointer=realloc(*headerpointer,bytesofheader+1);
 		strcat(*headerpointer,linebuf);
 		if(strcmp(linebuf,"\r\n")==0) {
@@ -401,7 +405,7 @@ recv_headers(httpsocket *mysocket,char **headerpointer/* ,void **bodypiece */)
 			} else {
 				mysocket->encoding=regular;
 			}
-			brintf("Detected Xfer Encoding: %s, translating to: %d\n",headerval,mysocket->encoding);
+			//brintf("Detected Xfer Encoding: %s, translating to: %d\n",headerval,mysocket->encoding);
 			fetchheader(*headerpointer,"content-length",headerval,1024);
 			mysocket->contentlength=atol(headerval);
 			
@@ -481,7 +485,7 @@ chunked_handler(httpsocket fdesc,FILE *datafile)
 			return 0; //FAIL
 		}
 		chunkbytes=strtoul(lengthline,&badchar,16);
-		brintf("Starting a chunk, lengthline is: '%s', numerically that's: %d And 'badchar' portion of string is: '%s', badchar strlen is: %d, [%hhd,%hhd]\n",
+		brintf("Starting a chunk, lengthline is: '%s', numerically that's: %d And 'badchar' portion of string is: '%s', badchar strlen is: %zd, [%hhd,%hhd]\n",
 			lengthline,chunkbytes,badchar,strlen(badchar),badchar[0],badchar[1]);
 			
 		if(badchar==lengthline) {

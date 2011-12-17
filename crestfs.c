@@ -52,12 +52,17 @@ static int
 crest_getattr(const char *path, struct stat *stbuf)
 {
 	char header[HEADERLEN]="";
+	brintf("crest_getattr for path: %s\n",path);
+	int permissions=0555; //default - read-only
+	if(wants_auth(path)) {
+		permissions=0755;
+	}
+	//memset(stbuf,0,sizeof(struct stat)); //just to be on the safe side?
 	
-	memset(stbuf,0,sizeof(struct stat)); //just to be on the safe side?
-
 	if (strcmp(path, "/") == 0) { /* The root directory of our file system. */
-		stbuf->st_mode = S_IFDIR | 0755;
+		stbuf->st_mode = S_IFDIR | permissions;
 		stbuf->st_nlink = 1; //set this to '1' to force find(1) to be able to iterate
+		return 0;
 	} else {
 		char hostname[80];
 		char pathpart[1024];
@@ -67,7 +72,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 		if(strcmp(pathpart,"/")==0 || strcmp(path,"/")==0) {
 			brintf("ROOT OF A HOST - *MUST* be a directory!\n");
 			//root of a host, MUST be a directory no matter what.
-			stbuf->st_mode = S_IFDIR | 0755; //I am a a directory!
+			stbuf->st_mode = S_IFDIR | permissions; //I am a a directory!
 			stbuf->st_nlink = 1; //use '1' to allow find(1) to decend within...
 		} else {
 			FILE *cachefile=0;
@@ -80,8 +85,8 @@ crest_getattr(const char *path, struct stat *stbuf)
 			
 			if(isdirectory) {
 				brintf("Getattr for directory mode detected.\n");
-				stbuf->st_mode = S_IFDIR | 0755;
-				stbuf->st_nlink = 1;
+				stbuf->st_mode = S_IFDIR| permissions;
+				stbuf->st_nlink = -1;
 			} else {
 				int httpstatus=fetchstatus(header);
 				char date[80]="";
@@ -98,7 +103,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 					case 201:
 					case 204:
 					//brintf("It is a file\n");
-					stbuf->st_mode = S_IFREG | 0700;
+					stbuf->st_mode = S_IFREG | permissions;
 					//brintf("Pre-mangulation headers: %s\n",header);
 					fetchheader(header,"last-modified",date,80);
 					fetchheader(header,"content-length",length,80);
@@ -134,7 +139,7 @@ crest_getattr(const char *path, struct stat *stbuf)
 					//http redirect, means either DIRECTORY or SYMLINK
 					//start out by keeping it simple - if it ends in a
 					//ZERO caching attempts, to start with...
-					stbuf->st_mode = S_IFLNK;
+					stbuf->st_mode = S_IFLNK| permissions;
 					stbuf->st_nlink = 1;
 					break;
 					
@@ -169,8 +174,6 @@ crest_getattr(const char *path, struct stat *stbuf)
 	return 0;
 }
 
-#include <libgen.h> //needed for dirname and friends, used to calculate symlink targets
-
 static int
 crest_readlink(const char *path, char * buf, size_t bufsize)
 {
@@ -190,6 +193,7 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 	}
 			
 	fetchheader(header,"Location",location,4096);
+	brintf("Header location value is: %s\n",location);
 	
 	//from an http://www.domainname.com/path/stuff/whatever
 	//we must get to a local path.
@@ -203,8 +207,8 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 		} else if(strlen(location)>0) {
 			strlcpy(buf,rootdir,bufsize); //fs cache 'root'
 			char dn[1024];
-			strlcpy(dn,path,1024);
-			strlcat(buf,dirname(dn),bufsize); //may modify argument, hence the copy
+			directoryname(path,dn,1024,0,0);
+			strlcat(buf,dn,bufsize); //may modify argument, hence the copy
 			strlcat(buf,"/",bufsize);
 			strlcat(buf,location,bufsize);
 			
@@ -289,9 +293,9 @@ crest_open(const char *path, struct fuse_file_info *fi)
 static int
 crest_release(const char *path __attribute__ ((unused)), struct fuse_file_info *fi)
 {
-	brintf("Closing filehandle %p: for file: %s\n",(FILE *)(unsigned int)fi->fh,path);
+	brintf("Closing filehandle %p: for file: %s\n",(FILE *)fi->fh,path);
 	if(fi->fh) {
-		return fclose((FILE *)(unsigned int)fi->fh);
+		return fclose((FILE *)fi->fh);
 	} else {
 		return 0;
 	}
@@ -428,7 +432,7 @@ crest_read(const char *path __attribute__ ((unused)), char *buf, size_t size, of
 		brintf("File was not properly opened?\n");
 		return -EIO;
 	}
-	cachefile=(FILE *)(unsigned int)fi->fh;
+	cachefile=(FILE *)fi->fh;
 	
 	if(cachefile) {
 		if(fseek(cachefile,offset,SEEK_SET)==0) {
@@ -452,12 +456,10 @@ crest_write(const char *path, const char *buf, size_t size, off_t offset, struct
 		brintf("File Info is ZERO for path: %s\n",path);
 		return -EIO;
 	}
-	FILE *cachefile=(FILE *)(unsigned int)fi->fh;
+	FILE *cachefile=(FILE *)fi->fh;
 	//need to prolly flock() the *metadata* file or something here?
 	char metafilename[1024];
-	strlcpy(metafilename,METAPREPEND,1024);
-	strlcat(metafilename,"/",1024);
-	strlcat(metafilename,path,1024);
+	metafile_for_path(path,metafilename,1024,0);
 	FILE *metafile=fopenr(metafilename+1,"r"); //only used for flock() now
 	if(!metafile) {
 		brintf("Couldn't open metafile on behalf of data-write: %s\n",metafilename);
@@ -572,8 +574,7 @@ crest_mknod(const char*path,mode_t m, dev_t d __attribute__((unused)))
 	}
 	brintf("mknod: it's a regular file...\n");
 	char metafilename[1024];
-	strncpy(metafilename,METAPREPEND,1024);
-	strncat(metafilename,path,1024);
+	metafile_for_path(path,metafilename,1024,0);
 	FILE * meta=fopenr(metafilename+1,"w+"); //CREATE IF NO EXIST!
 	if(!meta) {
 		brintf("COULD NOT CREATE METAFILE! %s",metafilename+1);
@@ -610,8 +611,7 @@ crest_unlink(const char *path)
 	//unlink path+1
 	char metapath[1024];
 	
-	strlcpy(metapath,METAPREPEND,1024);
-	strlcat(metapath,path,1024);
+	metafile_for_path(path,metapath,1024,0);
 	FILE *metafile=fopenr(metapath+1,"w+");
 	if(!metafile) {
 		brintf("Could not open metafile for %s for deletion, bailing?\n",path);
@@ -619,20 +619,14 @@ crest_unlink(const char *path)
 	}
 	safe_flock(fileno(metafile),LOCK_EX,metapath+1);
 
-	char hash[23];
-	hashname(path,hash);
 	char putpath[1024];
-	strlcpy(putpath,PENDINGDIR,1024);
-	strlcat(putpath,"/",1024);
-	strlcat(putpath,hash,1024);
+	putfile_for_path(path,putpath,1024);
 	brintf("The path I would unlink would be: %s\n",putpath);
 	int unl=unlink(putpath); //if this fails, that's fine.
 	brintf("Unlink of possible put file? %d\n",unl);
 	
 	char dirplace[1024];
-	strlcpy(dirplace,DIRUPLOADS,1024); // ".crestfs_dirblah"
-	strlcat(dirplace,"/",1024);	//".crestfs_dirblah/"
-	strlcat(dirplace,hash,1024);	//".crestfs_dirblah/01cb9f21"
+	putdir_for_path(path,dirplace,1024);
 	
 	unl=unlink(dirplace);
 	brintf("Unlink of possible put file's pending directory? Name: %s %d\n",dirplace,unl);
@@ -672,9 +666,7 @@ crest_rmdir(const char *path)
 	strlcpy(slashedpath,path,1024);
 	strlcat(slashedpath,"/",1024);
 	
-	strlcpy(metapath,METAPREPEND,1024);
-	strlcat(metapath,path,1024);
-	strlcat(metapath,DIRCACHEFILE,1024);
+	metafile_for_path(path,metapath,1024,1);
 	FILE *metafile=fopenr(metapath+1,"w+");
 	if(!metafile) {
 		brintf("Could not open metafile for %s for deletion, bailing?\n",path);
@@ -682,20 +674,14 @@ crest_rmdir(const char *path)
 	}
 	safe_flock(fileno(metafile),LOCK_EX,metapath+1);
 
-	char hash[23];
-	hashname(path,hash);
 	char putpath[1024];
-	strlcpy(putpath,PENDINGDIR,1024);
-	strlcat(putpath,"/",1024);
-	strlcat(putpath,hash,1024);
+	putfile_for_path(path,putpath,1024);
 	brintf("The path I would unlink would be: %s\n",putpath);
 	int unl=unlink(putpath); //if this fails, that's fine.
 	brintf("Unlink of possible put file? %d\n",unl);
 	
 	char penddir[1024];
-	strlcpy(penddir,DIRUPLOADS,1024);
-	strlcat(penddir,"/",1024);
-	strlcat(penddir,hash,1024);
+	putdir_for_path(path,penddir,1024);
 	int dunl=unlink(penddir);
 	(void)dunl;
 	brintf("Unlinked pending-directory file: %s: results: %d\n",penddir,dunl);
@@ -732,25 +718,24 @@ crest_mkdir(const char* path,mode_t mode __attribute__((unused)))
 {
 	char dirpath[1024];
 	//char *resultheaders=0;
-	strlcpy(dirpath,path,1024);
-	strlcat(dirpath,"/",1024);
 	append_parents(path);
 	//should unlink my own metadeata, no?
 	char mymeta[1024];
-	strlcpy(mymeta,METAPREPEND,1024);
-	strlcat(mymeta,path,1024);
+	metafile_for_path(path,mymeta,1024,0);
 	int res=unlink(mymeta+1); //unlink my plain-jane metadata file, if it existed (whew!)
 	(void)res;
 	brintf("I tried to unlink my personal metadata file: %s and got %d\n",mymeta+1,res);
 	res=mkdir(mymeta+1,0700);
 	brintf("Just tried to make my metadata directory %s and got %d\n",mymeta+1,res);
+	unlink(path+1); //if there was a file there before, get rid of it.
 	res=mkdir(path+1,0700); //boom. Just cut number of HTTP requests in HALF. HALF baby.
 	brintf("And making my directory-directory resulted in: %d, here's the dir we tried to make: %s, and here's errno: %s",
 		res,path+1,strerror(errno));
 	//we are re-using dirpath, above.
 	//it looks like this:      /domainname/dirname/dirname/
-	strlcat(dirpath,DIRCACHEFILE,1024); //so it'll have two slashes. So what. Shut up.
-	freshen_metadata(dirpath,200,"Content-type: x.vnd.bespin-corp/directory-manifest");
+	datafile_for_path(path,dirpath,1024,1);
+	brintf("Okay, and all that being said, the end result I should have is: %s\n",dirpath);
+	freshen_metadata(path,200,"Content-type: " MANIFESTTYPE);
 		 //make our metadata look nice 'n' fresh!
 		 //optimistically hope for directory manifest, we can fail back to text/html pretty easily
 	//need a directory *contents* file (size zero is fine)
@@ -854,6 +839,64 @@ crest_symlink(const char *link, const char *path)
 	return 0;
 }
 
+#include <sys/statvfs.h>
+/*
+verybigfs_statfs(const char *path, struct statvfs *stbuf)
+{
+    stbuf->f_bsize  = 1024 * 1024;  // 1MB 
+    stbuf->f_frsize = 128  * 1024;  // MAXPHYS 
+    stbuf->f_blocks = 0xFFFFFFFFUL; // aim for a lot; this is 32-bit though  
+    stbuf->f_bfree  = stbuf->f_bavail = stbuf->f_ffree = stbuf->f_favail = 0;
+    stbuf->f_files  = 3;
+    return 0;
+}
+
+*/
+int
+crest_statfs(const char *path __attribute__((unused)), struct statvfs *statbuf)
+{
+	static unsigned long freeblocks=0;
+	static unsigned long totalblocks=0;
+	static int statwhen=0;
+	brintf("Okay, fine, I'm calling statfs. So there.");
+	if(rootauthurl() && time(0) - statwhen> 10) {
+		char bytesusedbuf[1024];
+		char bytestotalbuf[1024];
+		char slashedpath[1024]="/";
+		// x-bytes-used
+		strlcat(slashedpath,rootauthurl(),1024);
+		strlcat(slashedpath,"/",1024);
+		httpsocket pointless=http_request(slashedpath,"OPTIONS",0,"statfs",0,0);
+		if(!http_valid(pointless)) {
+			return -EAGAIN;
+		}
+		char *resultheaders=0;
+		recv_headers(&pointless,&resultheaders);
+		wastebody(pointless);
+		http_close(&pointless);
+		fetchheader(resultheaders,"x-bytes-used",bytesusedbuf,1024);
+		fetchheader(resultheaders,"x-bytes-total",bytestotalbuf,1024);
+		unsigned int bytesused=atol(bytesusedbuf);
+		unsigned int bytestotal=atol(bytestotalbuf);
+		totalblocks=bytestotal/512;
+		if(bytestotal>= bytesused) {
+			freeblocks=(bytestotal-bytesused)/512;
+		} else {
+			freeblocks=0;
+		}
+		statwhen=time(0);
+	}
+	//brintf("Statfs called with path: %s\n",path);
+	statbuf->f_bsize=1024; /* fundamental file system block size. But does it matter? */
+	statbuf->f_frsize=1; /* what the hell is this? */
+	statbuf->f_blocks=totalblocks; /* total data blocks in file system */ /***** IMPORTANT *****/
+	statbuf->f_bfree=statbuf->f_bavail=freeblocks; /* free blocks in fs */ /* free blocks avail to non-superuser */ /***** IMPORTANT *****/
+	statbuf->f_ffree = statbuf->f_favail = 2147483647; /* free file nodes in fs */ /* second thing is mysterious!!! */
+    	statbuf->f_files  = 1234; /* total file nodes in file system */
+	//statbuf->f_namemax=1024;
+	return 0;
+}
+
 static struct fuse_operations crest_filesystem_operations = {
     .init    = crest_init,    /* mostly to keep access to cache, and initialize the putting_routine()     */
     .getattr = crest_getattr, /* To provide size, permissions, etc. */
@@ -877,6 +920,7 @@ static struct fuse_operations crest_filesystem_operations = {
     .utime = crest_utime,     //same-a-rino
     
     .unlink = crest_unlink,
+//    .statfs = crest_statfs	//this is maaaad busted
 /*
     .rename = MOVE - not liking new verbs today. maybe not. maybe DELETE followed by PUT
     .statfs - would be nice but I don't know how that would work....

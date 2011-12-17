@@ -12,8 +12,6 @@
 #include "common.h"
 #include "http.h"
 
-#include <crypt.h>
-
 //BSD-isms we have to replicate (puke, puke)
 
 #if defined(__linux__) && !defined(__dietlibc__) && !defined(__UCLIBC__)
@@ -57,6 +55,46 @@ asprintf(char **ret, const char *format, ...)
 #include <stdarg.h>
 #endif
 
+#if defined(__APPLE__)
+
+typedef struct {
+	char *pointer;
+	int length;
+	int marker;
+} cookietype;
+
+int fmem_readfn(void *cookie, char *buf, int length)
+{
+	cookietype *c=cookie;
+	if(c->marker + length > c->length) {
+		//you're trying to read too much.
+		length=c->length-c->marker;
+	}
+	strlcpy(buf,c->pointer+c->marker,length);
+	c->marker+=length;
+	return length;
+}
+
+int fmem_closefn(void *cookie)
+{
+	free(cookie);
+	return 0;
+}
+
+FILE *
+fmemopen(void *buf, size_t size, const char *mode)
+{
+	if(mode[0]!='r') {
+		return 0;
+	}
+	cookietype *c=malloc(sizeof(cookietype));
+	c->pointer=buf;
+	c->length=size;
+	c->marker=0;
+	return funopen(c,fmem_readfn,0,0,fmem_closefn);
+}
+#endif
+
 /* utility functions for debugging, path parsing, fetching, etc. */
 #include <sys/stat.h>
 
@@ -90,12 +128,17 @@ char mingie[65535]="";
 
 #ifndef SHUTUP
 
- void brintf(char *format,...)
+#include <pthread.h>
+
+void brintf(char *format,...)
 {
+	static pthread_mutex_t oneprint= PTHREAD_MUTEX_INITIALIZER;
 	va_list whatever;
 	va_start(whatever,format);
+	pthread_mutex_lock(&oneprint);
 	vprintf(format,whatever);
 	fflush(NULL);
+	pthread_mutex_unlock(&oneprint);
 }
 
 /* void brintf(char *format,...)
@@ -276,6 +319,69 @@ char _staticauthfile[1024]="";
 char _userpass[1024]="";
 //static buffer; which is fine, we don't want 15 different concepts of what authfile is happening
 
+
+/* #define METAPREPEND "/.crestfs_metadata_rootnode"
+#define DIRCACHEFILE "/.crestfs_directory_cachenode"
+*/
+
+void 
+metafile_for_path(const char *path,char *buffer, int buflen, int isdir) //isdir:0 no, 1:yes, -1:idunno? or a pointer?
+{
+	strlcpy(buffer,"/.crestfs_metadata_rootnode",buflen);
+	strlcat(buffer,path,buflen);
+	if(isdir) {
+		if(path[strlen(path)-1]!='/') {
+			strlcat(buffer,"/",buflen);
+		}
+		strlcat(buffer,".crestfs_directory_cachenode",buflen);
+	}
+	//brintf("Metafile_for_path: %s, returns buffer: %s\n",path,buffer);
+}
+
+void
+datafile_for_path(const char *path,char *buffer, int buflen, int isdir)
+{
+	strlcpy(buffer,path,buflen); //buffer+1?
+	if(isdir) {
+		if(path[strlen(path)-1]!='/') {
+			strlcat(buffer,"/",buflen);
+		}
+		strlcat(buffer,".crestfs_directory_cachenode",buflen);
+	}
+}
+
+#define DIRUPLOADS ".crestfs_pending_directories"
+void
+putdir_for_path(const char *path,char*buffer, int buflen)
+{
+	char hash[23];
+	static int tried_at_least_once=0;
+	hashname(path,hash);
+	strlcpy(buffer,DIRUPLOADS,buflen);
+	strlcat(buffer,"/",buflen);
+	strlcat(buffer,hash,buflen);
+	if(!tried_at_least_once) {
+		mkdir(DIRUPLOADS,0700);
+		tried_at_least_once=1;
+	}
+}
+
+#define PENDINGDIR ".crestfs_pending_writes"
+void
+putfile_for_path(const char *path,char*buffer,int buflen)
+{
+	char hash[23];
+	static int tried_at_least_once=0;
+	hashname(path,hash);
+	strlcpy(buffer,PENDINGDIR,buflen); // ".crestfs_dirblah"
+	strlcat(buffer,"/",buflen);	//".crestfs_dirblah/"
+	strlcat(buffer,hash,buflen);	//".crestfs_dirblah/01cb9f21"
+	if(!tried_at_least_once) {
+		mkdir(PENDINGDIR,0700);
+		tried_at_least_once=1;
+	}	
+}
+
 char *
 rootauthurl()
 {
@@ -308,9 +414,6 @@ rootauthurl()
 
 #include <pthread.h>
 
-pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
-
-
 void 
 hashname(const char *filename,char hash[23])
 {
@@ -322,7 +425,7 @@ hashname(const char *filename,char hash[23])
 	}
 		
 	snprintf(hash,23,"%x",hashnum);
-	brintf("resulting has is: %s\n",hash);
+	//brintf("resulting has is: %s\n",hash);
 	return;
 }
 
@@ -418,21 +521,24 @@ fill_authorization(const char *path,char *authstring,int authlen)
 
 #include <unistd.h>
 #include <sys/stat.h>
-#include <libgen.h> //for dirname()
 #include <errno.h>
+
+#include <utime.h>
 
 
 void 
 markdirty(const char *filename)
 {
-	char hash[23];
 	char pendplace[1024];
 	char mangledfilename[1024];
-	hashname(filename,hash);
-	strlcpy(pendplace,PENDINGDIR,1024);
-	strlcat(pendplace,"/",1024);
-	strlcat(pendplace,hash,1024);
-	mkdir(PENDINGDIR,0700);
+	struct stat pointless;
+	putfile_for_path(filename,pendplace,1024);
+	if(lstat(pendplace,&pointless)==0) {
+		//There's already a pending file put down.
+		brintf("Pending file for %s already exists, marking new and skipping\n",filename);
+		utime(pendplace,0);
+		return;
+	}
 	
 	strlcpy(mangledfilename,"..",1024);
 	strlcat(mangledfilename,filename,1024);
@@ -441,37 +547,39 @@ markdirty(const char *filename)
 	//hardlink to metadata of parent directory
 	//prevents refetching of directories who have pending writes.
 	char dirplace[1024];
-	strlcpy(dirplace,DIRUPLOADS,1024); // ".crestfs_dirblah"
-	strlcat(dirplace,"/",1024);	//".crestfs_dirblah/"
-	strlcat(dirplace,hash,1024);	//".crestfs_dirblah/01cb9f21"
+	putdir_for_path(filename,dirplace,1024);
 
 	char dirnamer[1024];
-	strlcpy(dirnamer,filename,1024);
-	char *mydirname=dirname(dirnamer); //dirname mangles filename :(
+	directoryname(filename,dirnamer,1024,0,0);
 	
 	char metadatafilename[1024];
-	strlcpy(metadatafilename,METAPREPEND,1024); // "/.crestfs_blah..."
-	strlcat(metadatafilename,mydirname,1024); // "/.crestfs_blah/hostname/dirname"
-	strlcat(metadatafilename,DIRCACHEFILE,1024); // "/.crestfs_blah/hostname/dirname/.crestfs_foo_blargh"
-
-	mkdir(DIRUPLOADS,0700);
+	metafile_for_path(dirnamer,metadatafilename,1024,1);
 	
 	int linkresults=link(metadatafilename+1,dirplace); //can fail if file exists, don't care.
 	if(linkresults) {
 		brintf("Problem creating directory pending hardlink: metadatafilename: %s, dirplace: %s, linkresults: %d, error: %s\n",metadatafilename+1,dirplace,linkresults,strerror(errno));
 	} else {
-		brintf("hardlink ok?: %s, %s\n",metadatafilename,dirplace);
+		brintf("hardlink ok?: %s, %s\n",metadatafilename+1,dirplace);
 	}
+}
+
+void
+invalidate_metadata(const char *metafile)
+{
+	unlink(metafile);
+/*	FILE *previous=fopen(metafile,"r+");
+	char previousheaders[8196];
+	fread(previousheadersprevious,1,8196,previous);
+	char mimetype[1024]; //if this is a directory, we NEED the mimetype!
+	char lastmod[1024];
+	
+	rewind(previous); */
 }
 
 int check_put(const char *path)
 {
-	char hash[23];
-	hashname(path,hash);
 	char putpath[1024];
-	strlcpy(putpath,PENDINGDIR,1024);
-	strlcat(putpath,"/",1024);
-	strlcat(putpath,hash,1024);
+	putfile_for_path(path,putpath,1024);
 	struct stat dontcare;
 	brintf("I am checking path: %s for path: %s\n",putpath,path);
 	return (lstat(putpath,&dontcare)==0);
@@ -505,8 +613,15 @@ void
 freshen_metadata(const char *path,int mode, char *extraheaders) //cleans and silences metadata for reasonable results to stat()'s, possibly before a file's been actually uploaded
 {
 	char metafilename[1024];
-	strlcpy(metafilename,METAPREPEND,1024);
-	strlcat(metafilename,path,1024);
+	int dirmode=0;
+	struct stat statbuf;
+	stat(path+1,&statbuf);
+	if(S_ISDIR(statbuf.st_mode)) {
+		brintf("Freshening metadata for path: %s which seems to be a directory\n",path+1);
+		dirmode=1;
+	}
+	metafile_for_path(path,metafilename,1024,dirmode);
+	brintf("Metafile we want to freshen is: metafilename+1: %s\n",metafilename+1);
 	FILE *metafile=fopen(metafilename+1,"w");
 	if(metafile) {
 		char httpdate[80];
@@ -529,7 +644,7 @@ freshen_metadata(const char *path,int mode, char *extraheaders) //cleans and sil
 		unsigned int writeres=fwrite(okstring,1,strlen(okstring)+1,metafile);
 		brintf("Final Freshened Header to Write: %s\n",okstring);
 		if(writeres != strlen(okstring)+1) {
-			brintf("rewriting metafile had some problems: write: %d, shoulda: %d\n",writeres,strlen(okstring));
+			brintf("rewriting metafile had some problems: write: %d, shoulda: %zd\n",writeres,strlen(okstring));
 		}
 		free(okstring);
 		fclose(metafile);
@@ -542,27 +657,19 @@ freshen_metadata(const char *path,int mode, char *extraheaders) //cleans and sil
 void scribble_directory_iterator(directory_iterator *iter,char *etags); //perhaps consider 'filename' too? Meh...
 //this function's a little private, we don't want just anyone scribbling all over directories.
 
-#include <utime.h>
-
 void
 delete_from_parents(const char *origpath)
 {
-	char path[1024];
-	strncpy(path,origpath,1024);
-	char * basepath=dirname((char *)path+1);
+	char dirnamepart[1024];
+	char basenamepart[1024];
+	directoryname(origpath,dirnamepart,1024,basenamepart,1024);
 	
-	char pathcopy[1024];
-	strncpy(pathcopy,origpath,1024);
-	char *shortname=basename(pathcopy); //non-reentrant?!! CAREFUL
 	char parentdir[1024];
 	char filename[1024];
-	strncpy(parentdir,basepath,1024);
-	strncat(parentdir,DIRCACHEFILE,1024);
+	datafile_for_path(dirnamepart,parentdir,1024,1);
 
 	char parentmetadir[1024];
-	strncpy(parentmetadir,METAPREPEND,1024);
-	strncat(parentmetadir,"/",1024);
-	strncat(parentmetadir,parentdir,1024);
+	metafile_for_path(dirnamepart,parentmetadir,1024,1);
 	char headers[8196];
 	FILE *metaheader=fopen(parentmetadir+1,"r");
 	if(!metaheader) {
@@ -573,13 +680,14 @@ delete_from_parents(const char *origpath)
 	fclose(metaheader);
 	
 	directory_iterator findit;
-	FILE *dirfile=fopen(parentdir,"r+"); //going to scribble on it!
+	FILE *dirfile=fopen(parentdir+1,"r+"); //going to scribble on it!
 	if(!dirfile) {
-		brintf("Could not open dirfile for scribbling, bailing routine\n");
+		brintf("Could not open dirfile %s for scribbling, bailing routine\n",parentdir+1);
+		return;
 	}
 	init_directory_iterator(&findit,headers,dirfile);
 	while(directory_iterate(&findit,filename,1024,0,0)) {
-		if(strcmp(filename,shortname)==0) {
+		if(strcmp(filename,basenamepart)==0) {
 			//somehwo use the directory iterator to 'scribble'?
 			//the filepointer is actually pointing AFTER our entry...
 			scribble_directory_iterator(&findit,0);
@@ -590,32 +698,46 @@ delete_from_parents(const char *origpath)
 		}
 	}
 	free_directory_iterator(&findit);
-	brintf("Could not find child entry for %s, silently continuing...\n",shortname);
+	brintf("Could not find child entry for %s, silently continuing...\n",basenamepart);
 	fclose(dirfile);
 }
 
 void 
 append_parents(const char *origpath)
 {
-	char path[1024];
-	char namepath[1024];
-	strncpy(path,origpath,1024);
-	strncpy(namepath,origpath,1024);
-	char * basepath=dirname((char *)path+1);
-	char * appendme=basename(namepath+1);
+	char namepart[1024];
+	char dirpart[1024];
+	directoryname(origpath,dirpart,1024,namepart,1024);
 	char parentdir[1024];
-	strncpy(parentdir,basepath,1024);
-	strncat(parentdir,DIRCACHEFILE,1024);
+	datafile_for_path(dirpart,parentdir,1024,1);
+	brintf("Appending to parents at this datafile: %s\n",parentdir);
 
 	char parentmetadir[1024];
-	strncpy(parentmetadir,METAPREPEND,1024);
-	strncat(parentmetadir,"/",1024);
-	strncat(parentmetadir,parentdir,1024);
+	metafile_for_path(dirpart,parentmetadir,1024,1);
 	
 	char headers[8192]="";
 	FILE *md=fopen(parentmetadir+1,"r");
 	if(!md) {
 		//no metadata file to append to! Get the hell outta here. return.
+		brintf("Could not open metadata file: %s - so I certainly can't append anything to it.\n",parentmetadir+1);
+		//this is an error, this shouldn't be allowed. This can't happen.
+		/*
+		
+		Heres the deal - what if we're talking a directory that you haven't asked for before.
+		
+		So it doesn't have any metadata thing. And it has no data-data thing either.
+		
+		now you make a directory under it - that ought to be permitted.
+		
+		then you try and stat the thing you just made. that goes to the internet - and causes FAIL.
+		
+		So I guess what we have to do, instead, is ...
+		
+		No ,wait, we have that whole directory thing. That's there for a reason. I know your parent.
+		
+		and if your parent is found in the pending_dirs, we *NEVER* ask the server for shit about it.
+		
+		*/
 		return;
 	}
 	int bytes=fread(headers,1,8192,md);
@@ -627,17 +749,17 @@ append_parents(const char *origpath)
 	
 	FILE *p=fopen(parentdir,"a");
 	if(p) {
-		if(strcasecmp(contenttype,"x-vnd.bespin.corp/directory-manifest")!=0) {
+		if(strcasecmp(contenttype,MANIFESTTYPE)!=0) {
 			fputs("\n<a href='",p);
-			fputs(appendme,p);
+			fputs(namepart,p);
 			fputs("'>",p);
-			fputs(appendme,p);
+			fputs(namepart,p);
 			fputs("</a>\n",p);
 		} else {
 			//md5sum /tmp/empty
 		
 			fputs("d41d8cd98f00b204e9800998ecf8427e ",p); //that's the MD5sum for 'no data'
-			fputs(appendme,p);
+			fputs(namepart,p);
 			fputs("\r\n",p);
 		}
 		fclose(p);
@@ -657,16 +779,16 @@ append_parents(const char *origpath)
 
 int safe_flock(int filenum,int lockmode,char *filename)
 {
-return 0;
+//return 0;
 	int lockresults=flock(filenum,lockmode|LOCK_NB);
 	if(lockresults==0) {
-		printf("Lock attempt on %s succeeded!\n",filename);
+		printf("LOCK: Lock attempt on %s succeeded!\n",filename);
 		return 0; //good.
 	}
 	int attempts=1;
 	while(lockresults==-1 && attempts < 15) {
-		brintf("ATTEMPT %d failed to lock %s because of: %d, sleeping...\n",attempts,filename,errno);
-		printf("Lock attempt on %s failed, retrying...\n",filename);
+		brintf("LOCK: ATTEMPT %d failed to lock %s because of: %d, sleeping...\n",attempts,filename,errno);
+		printf("LOCK: Lock attempt on %s failed, retrying...\n",filename);
 		sleep(1);
 		lockresults=flock(filenum,lockmode|LOCK_NB);
 		attempts++;
@@ -712,14 +834,16 @@ handle_hash_make(char *name)
 	strlcpy(linkname,PENDINGDIR,1024);
 	strlcat(linkname,"/",1024);
 	strlcat(linkname,name,1024);
-	char linktarget[1024];
+	char linktarget[1024]="";
 	int s=-1;
 	s=readlink(linkname,linktarget,1024);
+	//brintf("name: %s  - Reading link %s, got %s\n",name,linkname,linktarget);
 	if(s==-1) {
+		brintf("Could not read link\n");
 		return -1; //not able to read link
 	}
 	linktarget[s]='\0';
-	brintf("Look! I found this one: %s -> %s\n",name,linktarget);
+	//brintf("Look! I found this one: %s -> %s\n",name,linktarget);
 	//OK! Now check all the directory components and make sure they're "handled"
 	char pathmangler[1024];
 	strcpy(pathmangler,linktarget+2);
@@ -729,11 +853,11 @@ handle_hash_make(char *name)
 	while((slashpointer=strchr(slashpointer,'/'))){
 		//brintf("strchar returns: %s\n",slashpointer);
 		slashpointer[0]='\0';
-		brintf("Intermediate directory string is: %s\n",pathmangler);
+		//brintf("Intermediate directory string is: %s\n",pathmangler);
 		hashname(pathmangler,hash);
 		int res=handle_hash_make(hash); //try to handle component
 		if(res==0) {
-			brintf("Handled intermediate directory %s!\n",pathmangler);
+			//brintf("Handled intermediate directory %s!\n",pathmangler);
 		} else {
 			//brintf("Nothing to handle...\n");
 		}
@@ -742,31 +866,31 @@ handle_hash_make(char *name)
 	}
 	//lock the metadata file, PUT the results, and close the lock (opened FILE *)
 	char metafilename[1024];
-	strlcpy(metafilename,METAPREPEND,1024);
-	strlcat(metafilename,linktarget+2,1024);
+	metafile_for_path(linktarget+2,metafilename,1024,0); //why is it always linktarget+2? I don't know and I don't care.
 
 	struct stat st;
-	brintf("about to stat: %s\n",linktarget+3);
+	//brintf("about to stat: %s\n",linktarget+3);
 	if(lstat(linktarget+3,&st)!=0) {
 		brintf("Couldn't stat our file! Going to next iteration of loop\n");
 		return -1;
 	}
 	int sleeptime=10;
 	int fileage=time(0) - st.st_mtime;
-	brintf("Checking if File has been around long enough - IDLETIME is: %d, file age is %d, old sleep time was: %d, new sleep time might be: %d\n",
-		IDLETIME,fileage,sleeptime,IDLETIME-fileage);
+	//brintf("Checking if File has been around long enough - IDLETIME is: %d, file age is %d, old sleep time was: %d, new sleep time might be: %d\n",
+//		IDLETIME,fileage,sleeptime,IDLETIME-fileage);
 	if( fileage < IDLETIME) {
-		brintf("No it has NOT\n");
+		//brintf("No it has NOT\n");
 		if((IDLETIME - fileage) >0 && (IDLETIME - fileage) <sleeptime) {
 			sleeptime=IDLETIME-fileage;
 		}
 		return -1;
 	} else {
-		brintf("File is old enough, continue processing it\n");
+		//brintf("File is old enough, continue processing it\n");
 	}
 	
 	if(S_ISDIR(st.st_mode)) {
-		strlcat(metafilename,DIRCACHEFILE,1024);
+		metafile_for_path(linktarget+2,metafilename,1024,1);
+		//brintf("Metafile lookup is for a directory apparently, We are redoing metafile_for_path: %s and getting: %s\n",linktarget+2,metafilename);
 	}
 
 	FILE *metafile=fopen(metafilename+1,"r+");
@@ -774,22 +898,22 @@ handle_hash_make(char *name)
 	if(metafile) {
 		lck=safe_flock(fileno(metafile),LOCK_EX,metafilename+1);
 	} else {
-		brintf("Weird - cannot open metafile, means we can't scribble write status to it later. Let's bail this iteration\n");
+		//brintf("Weird - cannot open metafile, means we can't scribble write status to it later. Let's bail this iteration\n");
 		return -1;
 	}
-	brintf("We opened metafile: %s. results: %p. lockstatus: %d\n",metafilename+1,metafile,lck);
+	//brintf("We opened metafile: %s. results: %p. lockstatus: %d\n",metafilename+1,metafile,lck);
 	FILE *contentfile;
 	char *headerplus;
 	char *httpmethod="PUT";
 	char link[1024]="";
 	if(S_ISDIR(st.st_mode)) {
 		//directory?
-		brintf("DIRECTORY MODE!\n");
+	//	brintf("DIRECTORY MODE!\n");
 		contentfile=fopen("/dev/null","r"); //or should it be zero? I like the content length... I guess...
 		asprintf(&headerplus,"Content-length: 0");
 		strlcat(linktarget,"/",1024);
 	} else if (S_ISLNK(st.st_mode)) {
-		brintf("LINK MODE!!!!\n");
+		//brintf("LINK MODE!!!!\n");
 		char metaheaders[65535];
 		fread(metaheaders,1,65535,metafile);
 		fetchheader(metaheaders,"Location",link,1024);
@@ -799,19 +923,19 @@ handle_hash_make(char *name)
 			brintf("Metaheaders: %s\n",metaheaders);
 			return -1;
 		}
-		brintf("Discovered link is: %s\n",link);
+		//brintf("Discovered link is: %s\n",link);
 		contentfile=fmemopen((void *)link,strlen(link),"r"); //this used to be ...(newtarget,strlen(newtarget)...)
-		asprintf(&headerplus,"Content-length: %d",strlen(link)); //also used to be strlen(netwraget)
+		asprintf(&headerplus,"Content-length: %zd",strlen(link)); //also used to be strlen(netwraget)
 		httpmethod="POST";
 	} else {
 		//plain file?
 		contentfile=fopen(linktarget+3,"r");
-		asprintf(&headerplus,"Content-length: %d",(int)st.st_size);
+		asprintf(&headerplus,"Content-length: %lld",st.st_size);
 	}
-	brintf("Content file is: %s (%p)\n",linktarget+3,contentfile);
+	//brintf("Content file is: %s (%p)\n",linktarget+3,contentfile);
 	
 	//http_request(char *fspath,char *verb,char *etag, char *referer,char *extraheaders,FILE *body)
-	brintf("Our link target for today is: %s\n",linktarget+2);
+	//brintf("Our link target for today is: %s\n",linktarget+2);
 	httpsocket fd=http_request(linktarget+2,httpmethod,0,"putting_routine",headerplus,contentfile);
 	fclose(contentfile);
 	free(headerplus);
@@ -831,7 +955,7 @@ handle_hash_make(char *name)
 		//THIS MANUAL HEADER MANGLING BUSINESS *MUST* STOP!
 		//we have a nice routine for this now - freshen_metadata. 
 		//use that.
-		brintf("RECEIVED HEADERS SAY: %s\n",headerpointer);
+		//brintf("RECEIVED HEADERS SAY: %s\n",headerpointer);
 		fetchheader(headerpointer,"etag",etag,1024);
 		if(strlen(etag)>0) { 
 			strlcat(sanitized_headers,"Etag: ",8192);
@@ -856,7 +980,7 @@ handle_hash_make(char *name)
 		unlink(linkname);//now that we're done, toss the symlink
 		int unlinked=unlink(pendingfile);
 		(void)unlinked;
-		brintf("Unlinking PENDING entry: %s - %d\n",pendingfile,unlinked);
+		//brintf("Unlinking PENDING entry: %s - %d\n",pendingfile,unlinked);
 		free(headerpointer);
 		
 		//We don't need to mess with parental-invalidation, or anything like that - you handle that the moment
@@ -880,22 +1004,22 @@ void *
 putting_routine(void *unused __attribute__((unused)))
 {
 	while(1) {
-		brintf("I like to put things\n");
+		//brintf("Beginning PUT run...\n");
 		DIR *pendingdir=opendir(PENDINGDIR);
 		struct dirent mydirent;
 		struct dirent *dp=0;
 		memset(&mydirent,0,sizeof(mydirent));
 		if(pendingdir==0) {
-			brintf("Error opening pendingdir(%s) is: %s\n",PENDINGDIR,strerror(errno));
+			//brintf("Error opening pendingdir(%s) is: %s\n",PENDINGDIR,strerror(errno));
 			sleep(10);
 			continue;
 		}
 		while(readdir_r(pendingdir,&mydirent,&dp)==0) {
 			if(dp==0) {
-				brintf("End of directory?\n");
+				//brintf("End PUT run\n");
 				break;
 			}
-			brintf("Uh, checking name: %s\n",dp->d_name);
+			//brintf("Uh, checking name: %s\n",dp->d_name);
 			if(strcmp(dp->d_name,".")==0 || strcmp(dp->d_name,"..")==0) {
 				continue;
 			}
@@ -942,7 +1066,7 @@ init_directory_iterator(directory_iterator *iter,const char *headers, FILE *fp) 
 	char contenttype[1024]="";
 	brintf("Mine Headers arE: %s",headers);
 	fetchheader((char *)headers,"content-type",contenttype,1024);
-	if(strcasecmp(contenttype,"x-vnd.bespin.corp/directory-manifest")==0) {
+	if(strcasecmp(contenttype,MANIFESTTYPE)==0) {
 		iter->mode=manifest;
 		iter->iterator.manifestmode.fptr=fp; //be kind, rewind
 		iter->iterator.manifestmode.prevoffset=0;
@@ -972,7 +1096,7 @@ typedef enum {
 int
 directory_iterate(directory_iterator *metaiter,char *buf,int buflen,char *etagbuf,int etaglen)
 {
-	brintf("ITERATE!\n");
+	//brintf("ITERATE!\n");
 	char hrefname[255];
 	char linkname[255];
 	char *directory=0;
@@ -1011,10 +1135,10 @@ directory_iterate(directory_iterator *metaiter,char *buf,int buflen,char *etagbu
 		//hell, the algorithm may be in use somewhere already
 		while(!feof(metaiter->iterator.manifestmode.fptr) && !ferror(metaiter->iterator.manifestmode.fptr)) {
 			metaiter->iterator.manifestmode.prevoffset=ftell(metaiter->iterator.manifestmode.fptr);
-			brintf("Set previous offset to: %d",metaiter->iterator.manifestmode.prevoffset);
+			//brintf("Set previous offset to: %d",metaiter->iterator.manifestmode.prevoffset);
 			char * fgetsresult=fgets(fileline,2048,metaiter->iterator.manifestmode.fptr);
 			if(fgetsresult) {
-				brintf("Line fgotten: %s",fileline);
+				//brintf("Line fgotten: %s",fileline);
 				parse_states state=state_etag;
 				char *lineiter=fileline;
 				char *etagiter=etagbuf;
@@ -1026,18 +1150,18 @@ directory_iterate(directory_iterator *metaiter,char *buf,int buflen,char *etagbu
 							state=state_filename;
 							if(etagiter) {
 								*etagiter='\0';
-								brintf("So we think our etag is: %s\n",etagbuf);
+								//brintf("So we think our etag is: %s\n",etagbuf);
 							}
 							lineiter++;
 							continue;
 						}
 					}
 					if(*lineiter=='\r') {
-						brintf("Carriage Return detected\n");
+						//brintf("Carriage Return detected\n");
 						if(*(lineiter+1)=='\n') {
 							//we're done. Break.
 							*filenameiter='\0';
-							brintf("And so was a newline, filename is: %s\n",buf);
+							//brintf("And so was a newline, filename is: %s\n",buf);
 							int is_all_spaces=1;
 							unsigned int i;
 							for(i=0;i<strlen(buf);i++) {
@@ -1159,5 +1283,28 @@ void scribble_directory_iterator(directory_iterator *iter,char *etags) //perhaps
 		default:
 		brintf("Super freaky - unknown mode: %d for directory_scribbling\n",iter->mode);
 		break;
+	}
+}
+
+#include <libgen.h>
+
+void directoryname(const char *path,char *dirbuf, int dirbufsize,char *basebuf, int basebufsize)
+{
+	static pthread_mutex_t dirmutex = PTHREAD_MUTEX_INITIALIZER;
+	char stupidbuf[1024];
+	strlcpy(stupidbuf,path,1024);
+	pthread_mutex_lock(&dirmutex);
+	if(basebuf && basebufsize) {
+		strlcpy(basebuf,basename(stupidbuf),basebufsize);
+		strlcpy(stupidbuf,path,1024); //re-set the stupid name
+	}
+	if(dirbuf && dirbufsize) {
+		strlcpy(dirbuf,dirname(stupidbuf),dirbufsize);
+	}
+	pthread_mutex_unlock(&dirmutex);
+	brintf("Original path: %s - dirname: %s, basename: %s\n",path,dirbuf,basebuf);
+	if((dirbuf && dirbuf[0]=='\0') || (basebuf && basebuf[0]=='\0')) {
+		brintf("NULLZ\n");
+		exit(99);
 	}
 }

@@ -27,7 +27,6 @@
 #include <errno.h>
 #include <stdio.h>
 #include <sys/stat.h>
-#include <libgen.h> //for 'dirname'
 #include <utime.h>
 
 #include "resource.h"
@@ -43,106 +42,246 @@
 	check caches
 */
 
+typedef enum {
+	Nonexistent,	//File is impossible.
+	Unknown,	//Don't really know anything
+	Fresh,		//Etags _do_ match, this file is fresh; use its cache
+} file_plausibility;
+
 #include <time.h>
 
-int
-impossible_file(const char *origpath)
+#define MIN_META_SIZE 8
+
+file_plausibility
+is_plausible_file(const char *origpath)
 {
 	char path[1024];
+	#ifdef NOIMPOSSIBLE
+	return Unknown;
+	#endif
 	strlcpy(path,origpath,1024);
-	strlcat(path,"/",1024); //just to fool the while loop, I know it's ugly, I'm sorry.
-	char *slashloc=(char *)path+1;
+	char *slashloc=(char *)path+1; //izziss right?
 	
 	//first, is file on the upload list? If so, cannot be impossible.
 	if(check_put(origpath)) {
-		return 0; //cannot discount a newly-put file as 'impossible'
+		brintf("NOT IMPOSSIBLE: %s (newly-put) cannot be impossible, and is always Fresh\n",origpath);
+		return Fresh; //cannot discount a newly-put file as 'impossible'
 	}
 
 	//brintf("TESTIG FILE IMPOSSIBILITY FOR: %s\n",slashloc);
+	//GET METAFILE STUFF FOR FILE? Yes, godddammit, get it.
 	
-	while((slashloc=strchr(slashloc,'/'))!=0) {
-		char foldbuf[1024];
+	int exists=0; //is whether the DATAFILE exists
+	char foundit=0;
+	int stale=0;
+	int definitive=0;
+	char childetag[256]="";
+	char metafilechildpath[1024];
+	struct stat dumbstat;
+	//stat datafile for origpath (just for existence, all we care about). If exists, exists=1;
+	if(lstat(origpath+1,&dumbstat)==0) { //do 404's drop empty data files? IF not, this will keep refreshing nonexistent files...
+		brintf("Stat for origpath+1 succeeded: %s\n",origpath+1);
+		FILE *metaptr=0;
+		exists=1;
+		// note - none of this runs if there's no data file. If !exists, then your only two options are Nonexistent or Unknown,
+		// and for that we don't care about etag business.
+		//we may also need to know if it's a directory or not?
+		//check metadatafile for origpath - snag etag in case.
+		metafile_for_path(origpath,metafilechildpath,1024,S_ISDIR(dumbstat.st_mode));
+		brintf("Our metafile path is: %s\n",metafilechildpath);
+		if((metaptr=fopen(metafilechildpath+1,"r"))) {
+			brintf("Which we have opened\n");
+			char headerbuf[65535]="";
+			struct stat parentbuf;
+			if(stat(metafilechildpath+1,&parentbuf)==0) {
+				brintf("Metafile exists\n");
+				if(parentbuf.st_size > MIN_META_SIZE) {
+					//possibly big enough enough...
+					brintf("Metafile is big enough!\n");
+					if((time(0) - parentbuf.st_mtime) <=maxcacheage) {
+						//new enough! This is going to end up being 'fresh' (not-stale) and 'existent'
+						brintf("Metafile is NEW ENOUGH! WE're DEFINITIVE!\n");
+						definitive=1;
+						foundit=1;
+					} else {
+						//it's big enough, but it's not new enough. Let's note the etag for when we
+						//decend into the parent.
+						brintf("It's big enough, but not new enough :(\n");
+						brintf("Time: %ld, Mtime: %ld, MaxCacheAge: %d\n",(long)time(0),(long)parentbuf.st_mtime,maxcacheage);
+						int hdrlen=fread(headerbuf,1,65535,metaptr);
+						headerbuf[hdrlen+1]='\0';
+						fetchheader(headerbuf,"etag",childetag,256);
+					}
+				} else {
+					brintf("Metafile too teensy - size: %ld\n",(long)parentbuf.st_size);
+				}
+			} else {
+				brintf("Metafile doesn't exist. Which is pretty odd considering WE JUST OPENED IT!!!!!!\n");
+			}
+			fclose(metaptr);
+		}
+	
+	} else {
+		brintf("Stat of original file must've failed (statted: '%s')\n",origpath+1);
+	}
+	//this will itererate successively through parts of the path - 
+	//e.g., for /a/b/c/d/e,
+	//it should look at:
+	// /a/b/c/d/ for e,
+	// then /a/b/c/ for d, 
+	// etc.
+	// when we've hit a definitive directory, then we'll stop (something that's current or specific)
+	brintf("'Old' Slashloc: %s\n",slashloc);
+	while(!definitive && (slashloc=strrchr(path,'/'))!=0) {
+		foundit=0; //haven't found it yet...
+		path[slashloc-path]='\0';
+		slashloc++;
+		//okay 'path' is your directory name, 'slashloc' is the item name in it
+		brintf("'New' Slashloc: %s\n",slashloc);
+		brintf("'Fixed Path': %s\n",path);
 		char metafoldbuf[1024];
-		char dirnamebuf[1024];
-		char basenamebuf[1024];
-		char *dn=0;
-		char *bn=0;
-		int slashoffset=slashloc-path;
 		FILE *metaptr;
 		FILE *dataptr;
 		
-		strlcpy(foldbuf,path,1024);
-		foldbuf[slashoffset]='\0'; //why? I guess the pointer is being advanced PAST the slash?
-		//brintf("Testing component: %s, ",foldbuf);
-		strlcpy(dirnamebuf,foldbuf,1024);
-		dn=dirname(dirnamebuf);
-		
-		strlcpy(basenamebuf,foldbuf,1024);
-		bn=basename(basenamebuf);
-
-		//brintf("Component: %s, basename: %s, dirname: %s\n",foldbuf,bn,dn);
-		
-		strlcat(dirnamebuf,DIRCACHEFILE,1024);
-		strlcpy(metafoldbuf,METAPREPEND,1024);
-		strlcat(metafoldbuf,"/",1024);
-		strlcat(metafoldbuf,dirnamebuf,1024);
-		
-		//brintf("metafolder: %s, dirname is: %s\n",metafoldbuf+1,dirnamebuf+1);
+		metafile_for_path(path,metafoldbuf,1024,1);
+		brintf("metafolder: %s, dirname is: %s\n",metafoldbuf+1,path+1);		
 		
 		if((metaptr=fopen(metafoldbuf+1,"r"))) {
 			//ok, we opened the metadata for the directory..
 			char headerbuf[65535]="";
 			struct stat statbuf;
+			int thisfresh=0;
 			
 			fstat(fileno(metaptr),&statbuf);
 			int hdrlen=fread(headerbuf,1,65535,metaptr);
 			fclose(metaptr);
 			headerbuf[hdrlen+1]='\0';
 			//brintf("Buffer we are checking out is: %s",headerbuf);
-			if(time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) {
+			char contenttype[128];
+			fetchheader(headerbuf,"content-type",contenttype,128);
+			if((time(0) - statbuf.st_mtime) <= maxcacheage && statbuf.st_size > MIN_META_SIZE) {
 				//okay, the metadata is fresh...
-				//brintf("Metadata is fresh enough!\n");
-				if((dataptr=fopen(dirnamebuf+1,"r"))) {
+				brintf("Metadata is fresh enough! Marking DEFINITIVE (if it's a manifest)\n");
+				if(strncasecmp(contenttype,MANIFESTTYPE,128)==0) {
+					definitive=1; //we'll be done! this is the definitive thing
+				} else {
+					thisfresh=1; //only 'definitive' for nonexistence
+				}
+			} else {
+				brintf("Metadata file is too stale or too tiny to be sure. Age: %ld, Size: %ld\n",(long)(time(0) - statbuf.st_mtime),(long)statbuf.st_size);
+			}
+			if(thisfresh || strncasecmp(contenttype,MANIFESTTYPE,128)==0) {
+				//if we're an HTML dir listing that's fresh, or this is a MANIFEST, iterate the dir
+				char datafile[1024];
+				datafile_for_path(path,datafile,1024,1);
+				if((dataptr=fopen(datafile+1,"r"))) {
 					//okay, we managed to open the directory data...
-					char foundit=0;
 					char filename[1024];
+					char parentetag[256]="";
 					directory_iterator iter;
 					init_directory_iterator(&iter,headerbuf,dataptr);
-					while(directory_iterate(&iter,filename,1024,0,0)) {
-						brintf("Comparing %s to %s\n",filename,bn);
-						if(strcmp(filename,bn)==0) {
+					while(directory_iterate(&iter,filename,1024,parentetag,128)) {
+						brintf("Comparing %s to %s\n",filename,slashloc);
+						if(strcmp(filename,slashloc)==0) {
+							brintf("Found it!\n");
 							foundit=1;
+							if(strlen(parentetag)>0 && strlen(childetag)>0) {
+								brintf("ETAG CHECK Parent: %s, Child: %s!\n",parentetag,childetag);
+								//don't compare empty etags! They don't count!
+								if(strncmp(parentetag,childetag,256)!=0) {
+									//etag mismatch - file is not fresh
+									//we can DEFINITIVELY say this file is stale.
+									//(or some set of directories leading up to it is stale)
+									stale=1;
+									definitive=1;
+								}
+								//regardless, the metadata for this element now is the 'childetag'
+								fetchheader(headerbuf,"etag",childetag,256);
+							} else {
+								brintf("Could not do etag comparison: parent: %s, child: %s\n",parentetag,childetag);
+							}
 							break;
 						}
 					}
 					free_directory_iterator(&iter);
 					fclose(dataptr);
-					if(foundit==0) {
-						brintf("The file %s is impossible",origpath);
-						return 1;
+					if(thisfresh && !foundit) {
+						brintf("Marking definitive because I *didn't* find the entry, and thid directory is fresh\n");
+						definitive=1;
 					}
-					brintf("The file %s doesn't seem impossible by %s",origpath,bn);	
+					brintf("Definitiveness: %d, foundit: %d, thisfresh: %d, exists: %d\n",definitive,foundit,thisfresh,exists);
+					if(!definitive) {
+						brintf("The file %s doesn't seem impossible by %s\n",origpath,path);
+					}
 				} else {
-					//brintf("Can't open directory contents file.\n");
+					brintf("Can't open directory contents file.\n");
 				}
 			} else {
-				//brintf("Metadata file is too stale to be sure\n");
+				//nothing definitive here - move along
 			}
 		} else {
-			//brintf("Could not open metadata file %s\n",metafoldbuf+1);
+			brintf("Could not open metadata file %s\n",metafoldbuf+1);
 		}
-
-		slashloc+=1;//iterate past the slash we're on
 	}
-	//brintf("File '%s' appears not to be impossible, move along...\n",origpath);
-	return 0; //must not be impossible, or we would've returned previously
+	brintf("While loop done! Definitive: %d, Foundit: %d stale: %d, exists: %d\n",definitive,foundit,stale,exists);
+	if(definitive) {
+		//we're definitely done
+		if(foundit) {
+			if(exists && !stale) {
+				return Fresh;
+			} else {
+				return Unknown; //we found it, but we don't have a cachefile (or it's stale);
+			}
+		} else {
+			//definitively NOT FOUND
+			brintf("The file %s is impossible, Definitively.",origpath);
+			return Nonexistent;
+		}
+	}
+	//we must've never gotten anything definitive
+	brintf("File '%s' appears not to be impossible, move along...\n",origpath);
+	return Unknown; //must not be impossible, or we would've returned previously
 }
 
+/*
+This stat()'ing, read()'ing and utimes()'ing is beating the shit out of the FS.
 
+This needs to somehow be 'in memory'. How can we do that?
+
+Well, when we fetch - actually fetch - a directory, and we have its contents, maybe we don't do anything with it. We don't freshen anything,
+but we note that it _is_ fresh? Somehow? (memory cache: "dirpath" -> timestamp?).
+
+What we do *now* to determine whether or not we go to disk or go to 'net' would have to instead become a little more complicated. (yay? Ugh.)
+
+Whereas now, we basically check that the mtime of the metadata cache file is 'recent' enough, (after having checked file impossibility), the new 
+algorithm might be:
+
+impossible file detection (now, memory-cache aware!)
+check the mtime() on the file. If so, easy-peasy, you're good.
+If not - check the mtime()'s on all parents, starting at the root - this is similar to impossible-file detection. In fact, it ought to be built-in. 
+It becomes "file_plausibility - returninig 1, 0, -1. 1 - file is fresh and dandy! don't go to internet. 0 - dunno. -1 - file is stale? Nonexistent?"
+
+*/
 
 #include <utime.h>
 #include <sys/stat.h>
 
+void directory_freshen(const char *path,char *headers __attribute__((unused)), FILE *dirfile __attribute__((unused)))
+{
+	char metafile[1024];
+	metafile_for_path(path,metafile,1024,1);
+	struct utimbuf stamp;
+	struct stat oldtime;
+	int timeresults;
+	stat(metafile+1,&oldtime);
+	stamp.actime=oldtime.st_atime; //always leave atimes alone! This says nothing about 'access'!
+	stamp.modtime=time(0);
+	timeresults=utime(metafile+1,&stamp);
+	brintf("Freshening simply by touching directory metafile - results: %d",timeresults);
+}
+
+/* 
+Old, touch-ey way. blech.
 void directory_freshen(const char *path,char *headers,FILE *dirfile)
 {
 	char contenttype[1024];
@@ -164,36 +303,40 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 				brintf("BLANK etag for filename %s, skipping!\n",filename);
 				continue;
 			}
-			char direlem[2048];
-			snprintf(direlem,2048,"%s%s/%s" ,METAPREPEND,path,filename);
+			char potential_file[1024];
+			char metadatafile[1024];
+			
+			snprintf(potential_file,1024,"%s/%s",path,filename);
 			struct stat typeit;
-			if(lstat(direlem+1,&typeit)==0 && S_ISDIR(typeit.st_mode)) {
-				strncat(direlem,DIRCACHEFILE,2048); //already has a slash in front of it...GRRR
+			if(lstat(potential_file+1,&typeit)==0 && S_ISDIR(typeit.st_mode)) {
+				metafile_for_path(potential_file,metadatafile,1024,1);
+			} else {
+				metafile_for_path(potential_file, metadatafile,1024,0);
 			}
-			FILE *metafile=fopen(direlem+1,"r"); //lock your damned self you ingrate
-			brintf("I would like to open: %s, please? Results: %p\n",direlem+1,metafile);
+			FILE *metafile=fopen(metadatafile+1,"r"); //lock your damned self you ingrate
+			brintf("I would like to open: %s, please? Results: %p\n",metadatafile+1,metafile);
 			if(metafile) {
-				int hbytes=fread(headerbuf,1,8192,metafile);
+				int hbytes=fread(headerbuf,1,8191,metafile);
 				headerbuf[hbytes+1]='\0';
 				fclose(metafile);
 				fetchheader(headerbuf,"etag",fileetag,1024);
 				struct stat oldtime;
-				stat(direlem+1,&oldtime);
+				stat(metadatafile+1,&oldtime);
 				stamp.actime=oldtime.st_atime; //always leave atimes alone! This says nothing about 'access'!
 				int timeresults=-1;
 				if(strcmp(etag,fileetag)==0) {
 					stamp.modtime=time(0); //NOW!
 					brintf("%s UTIMING NEW!\n",filename);
 					//utime(direlem+1,&stamp); //Match! So this file is GOOD as of right now!
-					timeresults=utime(direlem+1,0);
+					timeresults=utime(metadatafile+1,0);
 				} else {
 					stamp.modtime=0; //EPOCH! LONG TIME AGO!
 					brintf("%s UTIMING OLD!\n",filename);
-					timeresults=utime(direlem+1,&stamp); //unmatch! This file is BAD as of right now, set its time BACK!
+					timeresults=utime(metadatafile+1,&stamp); //unmatch! This file is BAD as of right now, set its time BACK!
 				}
 				brintf("Results of stamping were: %d\n",timeresults);
 			} else {
-				brintf("NO METAFILE I COULD OPEN FOR %s - doing *NOTHING!!!*\n",direlem+1);
+				brintf("NO METAFILE I COULD OPEN FOR %s - doing *NOTHING!!!*\n",metadatafile+1);
 			}
 			//check etag for that file.
 			//if it MATCHES, touch the file
@@ -204,15 +347,19 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 		free_directory_iterator(&iter);
 	}
 }
-
+*/
 int dont_fclose(FILE *f)
 {
 	brintf("actually fclosing File: %p\n",f);
 	return fclose(f);
 }
 
+#define MAXTRIES 5
+
+#define BADFILE ((FILE *)-1)
+
 FILE *
-get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode)
+_get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode,int count)
 {
 	//first, check cache. How's that looking?
 	struct stat cachestat;
@@ -227,6 +374,11 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	int dirmode=0;
 	int dontuseetags=0;
 	
+	if(count++ >= MAXTRIES) {
+		brintf("%d is greater than count %d",count,MAXTRIES);
+		return BADFILE;
+	}
+	
 	char *headerbuf=calloc(65535,1);
 
 	headerbuf[0]='\0';
@@ -234,12 +386,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		preferredverb="GET";
 	}
 	
-	strncpy(cachefilebase,path+1,1024); //default non-directory path for a cache file...
+	datafile_for_path(path,cachefilebase,1024,0); //we're guessing non-directory to start with
 	strncpy(webresource,path,1024); //default web resource corresponding...
-	slashlessmetaprepend=METAPREPEND;
-	slashlessmetaprepend++;
-	strncpy(headerfilename,slashlessmetaprepend,1024);
-	strncat(headerfilename,path,1024); //need the prepended '/' from path, not cachefilebase
+	metafile_for_path(path,headerfilename,1024,0);
 
 	strncpy(selectedverb,preferredverb,80);
 	//if there is an etag, and the request is a HEAD, upgrade to a GET.
@@ -270,9 +419,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		
 		//and FURTHERMORE - the type we're assuming this resource is may no longer be true - 
 		//a file could've converted into a directory or some such!
-		strncat(cachefilebase,DIRCACHEFILE,1024); //need to append the "/.crestfs_directory_cachenode"	
+		datafile_for_path(path,cachefilebase,1024,1);
 		strncat(webresource,"/",1024);
-		strncat(headerfilename,DIRCACHEFILE,1024); //append same to metadata filename?
+		metafile_for_path(path,headerfilename,1024,1);
 		if(isdirectory) {
 			*isdirectory=1;
 		}
@@ -289,15 +438,44 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		}
 	}
 	
+/***** This chunk below seems all dedicated twoards figuring out whether or not we use the cachefile (if, of course, it's there) ***********/
 	//see if we have a cachefile of some sort. how old is it? Check the st_mtime of the _headerfile_ (the metadata)
 	//does this need to be LOCKed??????????  ************************  read LOCK ??? ***********************
-	headerfile=fopenr(headerfilename,"r+"); //the cachefile may not exist - we may have just had the 'real' file, or the directory
+
+	//Here's the new impossible file detection - wait till you had a chance to return cached data first
+	//then check if the file is impossible at the LAST MINUTE - *RIGHT* before you'd hit the Internets
+	file_plausibility is_plaus=is_plausible_file(path);
+	switch(is_plaus) {
+		case Fresh:
+		brintf("File Plausibility for %s says FRESH\n",path);
+		break;
+		
+		case Nonexistent:
+		brintf("File Plausibility for %s says NONEXISTENT\n",path);
+		break;
+		
+		case Unknown:
+		brintf("File Plausibility for %s says UNKNOWN\n",path);
+		break;
+		
+		default:
+		brintf("File Plausibility for %s says something weird! (%d)",path,is_plaus);
+	}
+	if(is_plaus==Nonexistent) {
+		if(headers && headerlength>0) {
+			headers[0]='\0';
+		}
+		free(headerbuf);
+		return 0;
+	}
+
+	headerfile=fopenr(headerfilename+1,"r+"); //the cachefile may not exist - we may have just had the 'real' file, or the directory
 						//if so, that's fine, it will parse out as 'too old (1/1/1970)'
 	if(headerfile) {
 		struct stat statbuf; //I feel like this stat needs to happen before the fopenr - FIXME
 		int s=-1;		//if fopenr() created the file, won't stat() make it seem 'new'? FIXME
-		safe_flock(fileno(headerfile),LOCK_SH,headerfilename);
-		s=stat(headerfilename,&statbuf); //assume infallible
+		safe_flock(fileno(headerfile),LOCK_SH,headerfilename+1);
+		s=stat(headerfilename+1,&statbuf); //assume infallible
 		//read up the file and possibly fill in the headers buffer if it's been passed and it's not zero and headerlnegth is not 0
 		int hdrbytesread=fread(headerbuf,1,65535,headerfile); //and this is big by one? FIXME
 		headerbuf[hdrbytesread+1]='\0'; //I think this is off by one!?!? FIXME
@@ -320,8 +498,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		brintf("Has the file been PUT? Answer: %d\n",has_file_been_PUT);
 		brintf("Is directory pending for uploads? %d\n",is_directory_pending_uploads);
 		
-		if((time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) || has_file_been_PUT || is_directory_pending_uploads) {
+		if((time(0) - statbuf.st_mtime <= maxcacheage && statbuf.st_size > 8) || has_file_been_PUT || is_directory_pending_uploads || 
+			is_plaus==Fresh ) {
 			//our cachefile is recent enough and big enough, or there's been an intervening PUT
+			//or file-plausibility says that an intervening directory had etags matches and you're All Good from there
 			FILE *tmp=0;
 			/* If your status isn't 200 or 304, OR it actually is, but you can succesfully open your cachefile, 
 					then you may return succesfully. Or if it's a HEAD reequest (where you don't care about such things)
@@ -344,7 +524,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				already 'upgraded' the selectedverb to GET. Yeah, that sounds good?
 			*/
 			
-			brintf("NEW CACHE - COMPLICATED QUESTION: file: %s verb: %s, status: %d headers: '%s'\n",headerfilename,selectedverb,fetchstatus(headerbuf),headerbuf);
+			brintf("NEW CACHE - COMPLICATED QUESTION: file: %s verb: %s, status: %d headers: '%s'\n",headerfilename+1,selectedverb,fetchstatus(headerbuf),headerbuf);
 			
 			/* problem - this is *not* using cached data for HEAD's that don't return files - 
 			e.g. - I stat() a file without grabbing it. That causes a HEAD.
@@ -360,22 +540,24 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 				has_file_been_PUT))   //or file was recently PUT
 			{
 				//THEN you need a real live file pointer returned to you
-				tmp=fopen(cachefilebase,cachefilemode);
+				tmp=fopen(cachefilebase+1,cachefilemode);
 				//if it was a HEAD request, it's okay if you couldn't get the file
 				if(tmp || strcmp(selectedverb,"HEAD")==0) { 
 					if(headers && headerlength>0) {
 						strncpy(headers,headerbuf,headerlength);
 					}
 					dont_fclose(headerfile); //RELEASE LOCK!!!!!
+					/* this is enormously bad. Do'nt do this.
 					if(dirmode) {
 						brintf("FRESHENING OFF OF CACHE HIT! path: %s, headers: %s, ptr: %p\n",path,headerbuf,tmp);
 						directory_freshen(path,headerbuf,tmp);
 					}
+					*/
 					free(headerbuf);
 					return tmp;
 				} else {
 					brintf("You tried to open the cachefile %s in mode %s and FAILED, so fallthrough.\n",
-						cachefilebase,cachefilemode);
+						cachefilebase+1,cachefilemode);
 				}
 			} else {
 				//you don't need no stinkin' files!
@@ -392,7 +574,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			
 		} else {
 			brintf("Cache file is too old (or too small); continuing with normal behavior. cachefilename: %s Age: %ld maxcacheage: %d, filesize: %d\n",
-				headerfilename,(int)time(0)-statbuf.st_mtime,maxcacheage,(int)statbuf.st_size);
+				headerfilename+1,(int)time(0)-statbuf.st_mtime,maxcacheage,(int)statbuf.st_size);
 		}
 	} else {
 		//no cachefile exists, we ahve to create one while watching out for races.
@@ -401,28 +583,20 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 		//which one might flock() ... but creating said file - when it might be a directory - could be bad. What to do, what to do?
 		//fock()
 		brintf("Instantiating non-existent metadata cachefile for something.\n");
-		if(!(headerfile=fopenr(headerfilename,"w+x"))) {
-			brintf("RACE CAUGHT ON FILE CREATION for %s! NOt sure what to do about it though... reason: %s. How bout we just fail it?\n",headerfilename,strerror(errno));
+		if(!(headerfile=fopenr(headerfilename+1,"w+x"))) {
+			brintf("RACE CAUGHT ON FILE CREATION for %s! NOt sure what to do about it though... reason: %s. How bout we just fail it?\n",headerfilename+1,strerror(errno));
 			free(headerbuf);
-			return 0;
+			return BADFILE;
 			//headerfile=fopenr(headerfilename,"w"); //this means a race was found and prevented(?)
 		}
-		safe_flock(fileno(headerfile),LOCK_SH,headerfilename); //shared lock will immediately be upgraded...
+		safe_flock(fileno(headerfile),LOCK_SH,headerfilename+1); //shared lock will immediately be upgraded...
 	}
 	
 	//either there is no cachefile for the headers, or it's too old.
 	//the weird thing is, we have to be prepared to return our (possibly-outdated) cache, if we can't get on the internet
 	
-	//Here's the new impossible file detection - wait till you had a chance to return cached data first
-	//then check if the file is impossible at the LAST MINUTE - *RIGHT* before you'd hit the Internets	
-	if(impossible_file(path)) {
-		if(headers && headerlength>0) {
-			headers[0]='\0';
-		}
-		free(headerbuf);
-		dont_fclose(headerfile);
-		return 0;
-	}
+/***** end all the cache fiddling - if the cache was good, we used it, if not, we are continuing on. Should that all be extracted out? *****/	
+	
 	char acceptheader[80]="";
 	if(dirmode) {
 		strcpy(acceptheader,"Accept: x-vnd.bespin.corp/directory-manifest, */*; q=0.5");
@@ -446,7 +620,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			// in a 304 response. expletive expletive.
 			if(fetchstatus(received_headers)==304) {
 				brintf("FAST 304 Etags METHOD! Not touching much (just utimes)\n");
-				utime(headerfilename,0);
+				utime(headerfilename+1,0);
 				if(headers && headerlength>0 ) {
 					//So - why do we do this? Why not use the on-file headers instead?
 					strlcpy(headers,headerbuf,headerlength);
@@ -455,7 +629,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					brintf("Original file was a file, gonna fopen the datafile\n");
 					//this can be problematic if we were a symlink
 					
-					datafile=fopen(cachefilebase,cachefilemode); //use EXISTING basefile...
+					datafile=fopen(cachefilebase+1,cachefilemode); //use EXISTING basefile...
 					brintf("FOPENED!\n");
 				} else {
 					datafile=0; //this could've been a symlink, don't try to open it
@@ -482,15 +656,16 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 			} else {
 				int truncatestatus=0;
 				char location[1024]="";
-				char dn[1024];
 				char tempfile[1024];
+				char metafile[1024];
+				struct stat st;
 				int tmpfd=-1;
 				/* problems with the anti-starbucksing protocol - need to handle redirects and 404's
 					without at least the 404 handling, you can't negatively-cache nonexistent files.
 				*/
 				//brintf("We should be fputsing it to: %p\n",headerfile);
 				//need to upgrade read-lock to WRITE lock
-				safe_flock(fileno(headerfile),LOCK_EX,headerfilename); //lock upgrade!
+				safe_flock(fileno(headerfile),LOCK_EX,headerfilename+1); //lock upgrade!
 				truncatestatus=ftruncate(fileno(headerfile),0); // we are OVERWRITING THE HEADERS - we got new headers, they're good, we wanna use 'em
 				rewind(headerfile); //I think I have to do this or it will re-fill with 0's?!
 				//brintf(" Craziness - the number of bytes we should be fputsing is: %d\n",strlen(mybuffer));
@@ -525,29 +700,27 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						dont_fclose(headerfile); //RELEASE LOCK!
 						free(received_headers);
 						brintf("DUDE TOTALLY SUCKY!!!! Somebody HEAD'ed a resource and we had to unlink its data file.\n");
-						unlink(cachefilebase);
+						unlink(cachefilebase+1);
 						http_close(&mysocket);
 						free(headerbuf);
 						return 0;// NO CONTENTS TO DEAL WITH HERE!
 					}
-					strncpy(dn,cachefilebase,1024);
-					dirname(dn);
-					strncpy(tempfile,dn,1024);
+					directoryname(cachefilebase,tempfile,1024,0,0);
 					strncat(tempfile,"/.tmpfile.XXXXXX",1024);
-					redirmake(tempfile); //make sure intervening directories exist, since we can't use fopenr()
-					tmpfd=mkstemp(tempfile); //dumbass, this creates the file.
-					//brintf("tempfile will be: %s, it's in dirname: %s\n",tempfile,dn);
+					redirmake(tempfile+1); //make sure intervening directories exist, since we can't use fopenr()
+					tmpfd=mkstemp(tempfile+1); //dumbass, this creates the file.
+					brintf("tempfile will be: %s, has fd: %d\n",tempfile,tmpfd);
 					datafile=fdopen(tmpfd,"w+");
 					if(!datafile) {
 						brintf("Cannot open datafile for some reason?: %s",strerror(errno));
 					}
 					
 					contents_handler(mysocket,datafile);
-					if(rename(tempfile,cachefilebase)) {
-						brintf("Could not rename file to %s because: %s\n",cachefilebase,strerror(errno));
+					if(rename(tempfile+1,cachefilebase+1)) {
+						brintf("Could not rename file to %s because: %s\n",cachefilebase+1,strerror(errno));
 					}
-					chmod(cachefilebase,0777);
-					datafile=freopen(cachefilebase,"r",datafile);
+					chmod(cachefilebase+1,0777);
+					datafile=freopen(cachefilebase+1,"r",datafile);
 					if(!datafile) {
 						brintf("Failed to reopen datafile?!: %s\n",strerror(errno));
 					}
@@ -588,10 +761,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					{
 						brintf("Location discovered to be: %s, assuming DIRECTORY and rerunning!\n",location);
 						//assume this must be a 'directory', but we requested it as if it were a 'file' - rerun!
-						redirmake(cachefilebase); //make enough of a path to hold what will go here
-						unlink(cachefilebase); //if it's a file, delete the file; it's not a file anymore
-						mkdir(cachefilebase,0700); 
-						unlink(headerfilename); //the headerfile being a file will mess things up too
+						redirmake(cachefilebase+1); //make enough of a path to hold what will go here
+						unlink(cachefilebase+1); //if it's a file, delete the file; it's not a file anymore
+						mkdir(cachefilebase+1,0700); 
+						unlink(headerfilename+1); //the headerfile being a file will mess things up too
 									//and besides, it's just going to say '301', which isn't helpful
 						dont_fclose(headerfile);
 						free(received_headers);
@@ -603,9 +776,9 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						//TEMP WORKAROUND FIX FOR POSSIBLE BUG ISOLATION STUFF?!
 						//delete_keep(mysocket);
 						//close(mysocket);
-						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode);
+						return _get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode,count);
 					} else {
-						brintf("We are thinking this is a symlink. location: %s, pathpart: %s, strlen(loc): %d, strlen(pathpart): %d",location,pathpart,strlen(location),strlen(pathpart));
+						brintf("We are thinking this is a symlink. location: %s, pathpart: %s, strlen(loc): %zd, strlen(pathpart): %zd",location,pathpart,strlen(location),strlen(pathpart));
 					}
 					//otherwise (no slash at end of location path), we must be a plain, boring symlink or some such.
 					//yawn.
@@ -628,8 +801,8 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						//we 404'ed (or 403'ed) in dirmode. Shit.
 						char headerdirname[1024];
 						brintf("Directory mode resulted in 404. Retrying as regular file...\n");
-						unlink(cachefilebase);
-						unlink(headerfilename);
+						unlink(cachefilebase+1);
+						unlink(headerfilename+1);
 						rmdir(path+1);
 						strncpy(headerdirname,slashlessmetaprepend,1024);
 						strncat(headerdirname,path,1024);
@@ -642,7 +815,17 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 						http_close(&mysocket);
 						free(headerbuf);
 						if (headerfile) dont_fclose(headerfile); //need this?! release lock?
-						return get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode);
+						return _get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode,count);
+					}
+					//file mode - must invalidate parent directory if it said I should be here.
+					//if I stat the parent directory metadata and it's recent enough to know better, then invalidate it by
+					//stomping its etags and timing it 'old'
+					directoryname(cachefilebase,tempfile,1024,0,0);
+					metafile_for_path(tempfile,metafile,1024,1);
+					stat(metafile+1,&st);
+					if(time(0)-st.st_mtime<=maxcacheage) {
+						brintf("Parents should've known better. Invalidating");
+						invalidate_metadata(metafile+1);
 					}
 					//NOTE! We are *NOT* 'break'ing after this case! We are deliberately falling into the following case
 					//which basically returns a 0 after clearning out everything that's bust.
@@ -673,7 +856,14 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 					if(headerfile) {
 						dont_fclose(headerfile); //release lock!if you have it...
 					}
-					return 0;
+					if(fetchstatus(received_headers)>=500 && fetchstatus(received_headers)<600) {
+						brintf("Retrying 500-series error: %d - attempt #%d",fetchstatus(received_headers),count);
+						char modpurpose[1024];
+						strlcpy(modpurpose,purpose,1024);
+						strlcat(modpurpose,"+retry",1024);
+						return _get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode,count);
+					}
+					return BADFILE;
 					break;
 				} //end switch on http status
 			} //end 'else' clause about whether we have CREST headers or not
@@ -689,7 +879,7 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	// OPEN QUESTION - how does this work for NONEXISTENT files when the internet isn't there?! How can I tell the difference?!
 	FILE *staledata=0;
 	brintf("BAD INTERNET CONNECTION, returning possibly-stale cache entries for webresource: %s\n",webresource);
-	brintf("Headers - which I woudl think wouldn't exist for nonexistent files - are: %s len(%d)\n",headerbuf,strlen(headerbuf));
+	brintf("Headers - which I woudl think wouldn't exist for nonexistent files - are: %s len(%zd)\n",headerbuf,strlen(headerbuf));
 	if(headers && headerlength>0) {
 		brintf("Headerbuf has been filled, copying it to result headers\n");
 		brintf("Current headers are: %s",headerbuf);
@@ -698,10 +888,10 @@ get_resource(const char *path,char *headers,int headerlength, int *isdirectory,c
 	}
 	free(headerbuf);
 	//brintf("Header buffer freed\n");
-	brintf("The cache file base we'd _like_ to have open will be: %s\n",cachefilebase);
+	brintf("The cache file base we'd _like_ to have open will be: %s\n",cachefilebase+1);
 	//careful, doing stat() here and not lstat - if it's a symlink, just follow it.
-	if(lstat(cachefilebase,&cachestat)==0 && (S_ISREG(cachestat.st_mode) || S_ISLNK(cachestat.st_mode))) {
-		staledata=fopen(cachefilebase,cachefilemode); //could be 0
+	if(lstat(cachefilebase+1,&cachestat)==0 && (S_ISREG(cachestat.st_mode) || S_ISLNK(cachestat.st_mode))) {
+		staledata=fopen(cachefilebase+1,cachefilemode); //could be 0
 		if(!staledata) {
 			brintf("Crap, coudln't open datafile even though we could stat it. Why?!?! %s\n",strerror(errno));
 		} else {
