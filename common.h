@@ -1,4 +1,7 @@
 
+extern char rootdir[1024];
+
+
 #ifndef SHUTUP
 
 void brintf(char *format,...) __attribute__ ((format (printf, 1,2)));

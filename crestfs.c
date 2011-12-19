@@ -30,7 +30,6 @@
 #include <pthread.h>
 
 //global variables (another one is down there but it's use is jsut there.
-char rootdir[1024]="";
 char cachedirname[1024]="";
 int maxcacheage=-1;
 
@@ -80,7 +79,9 @@ crest_getattr(const char *path, struct stat *stbuf)
 			/**** ALL WORK IS DONE WITH get_resource! ****/
 			
 			cachefile=get_resource(path,header,HEADERLEN,&isdirectory,"HEAD","getattr","r");
-			
+			if(cachefile==BADFILE) {
+				return -EIO;
+			}
 			/*** THAT DID A LOT! ****/
 			
 			if(isdirectory) {
@@ -178,12 +179,13 @@ static int
 crest_readlink(const char *path, char * buf, size_t bufsize)
 {
 	//we'll start with the assumption this actuallly IS a symlink.
-	char location[4096]="";
-	char header[HEADERLEN]="";
 	FILE *cachefile;
 	int is_directory=-1;
 	
-	cachefile=get_resource(path,header,HEADERLEN,&is_directory,"HEAD","readlink","r");
+	cachefile=get_resource(path,0,0,&is_directory,"HEAD","readlink","r");
+	if(cachefile==BADFILE) {
+		return -EIO;
+	}
 	
 	if(is_directory) {
 		if(cachefile) {
@@ -191,63 +193,17 @@ crest_readlink(const char *path, char * buf, size_t bufsize)
 		}
 		return -EINVAL;
 	}
-			
-	fetchheader(header,"Location",location,4096);
-	brintf("Header location value is: %s\n",location);
-	
-	//from an http://www.domainname.com/path/stuff/whatever
-	//we must get to a local path.
-	if(strncmp(location,"http://",7)!=0) {
-		//relative symlink. Either relative to _SERVER_ root, or relative to dirname...
-		if(location[0]=='/') {
-			brintf("No absolute directory-relative symlinks yet, sorry\n");
-			return -EIO;
-			strlcpy(buf,rootdir,bufsize); //fs cache 'root'
-			
-		} else if(strlen(location)>0) {
-			strlcpy(buf,rootdir,bufsize); //fs cache 'root'
-			char dn[1024];
-			directoryname(path,dn,1024,0,0);
-			strlcat(buf,dn,bufsize); //may modify argument, hence the copy
-			strlcat(buf,"/",bufsize);
-			strlcat(buf,location,bufsize);
-			
-		} else {
-			strlcpy(buf,rootdir,bufsize); //fs cache 'root'
-			brintf("Unsupported protocol, or missing 'location' header: %s\n",location);
-			return -ENOENT;
-		}
-	} else {
-		strlcpy(buf,rootdir,bufsize); //fs cache 'root'
-		strlcat(buf,"/",bufsize);
-		strlcat(buf,location+7,bufsize);
-	}
-	
+		
 	if(cachefile) {
 		brintf("Freaky, got a valid cachefile for a symlink?!\n");
 		fclose(cachefile);
 	}
-	struct stat st;
-	int stres=lstat(path+1,&st);
-	if(stres==0 && S_ISLNK(st.st_mode)) {
-		char linkbuf[1024]="";
-		int linklen=readlink(path+1,linkbuf,1024);
-		if(linklen>1023) {
-			brintf("Too long of a link :(\n");
-			exit(54); //buffer overflow
-		}
-		linkbuf[linklen+1]='\0';
-		if(stres==0 && strncmp(linkbuf,buf,1024)==0) {
-			//brintf("Perfect match on symlink! Not doing anything\n");
-			return 0;
-		} else {
-			brintf("Nope, link is badly made, it is currently: %s\n",linkbuf);
-		}
+	char datafile[1024];
+	datafile_for_path(path,datafile,1024,0);
+	int readresults=readlink(datafile+1,buf,bufsize);
+	if(readresults==-1 || readresults>=1023) {
+		return -EIO;
 	}
-	brintf("I will unlink: %s, and point it to: %s\n",path+1,buf);
-	int unlinkstat=unlink(path+1); (void)unlinkstat;
-	int linkstat=symlink(buf,path+1); (void)linkstat;
-	brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
 	return 0;
 }
 
@@ -266,6 +222,9 @@ crest_open(const char *path, struct fuse_file_info *fi)
 		}
 	}
 	rsrc=get_resource(path,headers,4096,&is_directory,"GET","open",(wantwrite? "r+": "r"));
+	if(rsrc==BADFILE) {
+		return -EIO;
+	}
 	if(is_directory) {
 		if(rsrc) {
 			fclose(rsrc);
@@ -337,6 +296,9 @@ crest_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 	char headers[8192];
 	dirfile=get_resource(path,headers,8192,&is_directory,"GET","readdir","r");
+	if(dirfile==BADFILE) {
+		return -EIO;
+	}
 	brintf("Just fetched the resource for this directory you're reading, just FYI.");
 	if(!is_directory) {
 		if(dirfile) {
@@ -535,6 +497,9 @@ crest_trunc (const char *path, off_t length)
 	//it won't get refreshed
 	int isdirectory=-1;
 	FILE *cachefile=get_resource(path,0,0,&isdirectory,"GET","trunc","r+");
+	if(cachefile==BADFILE) {
+		return -EIO;
+	}
 	if(isdirectory) {
 		return -EISDIR;
 	}
@@ -1124,6 +1089,8 @@ main(int argc, char **argv)
 	#ifdef __APPLE__
 	addparam(&myargc,&myargs,"-o");
 	addparam(&myargc,&myargs,"nolocalcaches");
+	addparam(&myargc,&myargs,"-o");
+	addparam(&myargc,&myargs,"daemon_timeout=300"); //need higher daemon timeout for Mac OS X - 60 seconds is too tight
 	#else
 	addparam(&myargc,&myargs,"-o");
 	addparam(&myargc,&myargs,"nonempty");

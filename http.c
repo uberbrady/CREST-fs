@@ -153,7 +153,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 	
 	//brintf("Hostname is: %s, path is: %s\n",hostpart,pathpart);
 	
-	//brintf("http_request: VERB: %s, URL: %s, referer: %s, extraheaders: %s, body pointer: %p\n",verb,fspath,referer,extraheaders,body);
+	//brintf("http_request: VERB: %s, URL: %s, etag: %s,referer: %s, extraheaders: %s, body pointer: %p\n",verb,fspath,etag,referer,extraheaders,body);
 	start=time(0);
 	//brintf("Getaddrinfo timing test: BEFORE: %ld\n",start);
 	
@@ -257,7 +257,7 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		strlcat(extraheadersbuf,"\r\n",16384);
 	}
 	asprintf(&reqstr,"%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: CREST-fs/1.75\r\nReferer: %s\r\n%s\r\n",verb,pathpart,hostpart,referer,extraheadersbuf);
-	//brintf("REQUEST: %s\n",reqstr);
+	brintf("REQUEST: %s\n",reqstr);
 	int sendresults=send(sockfd,reqstr,strlen(reqstr),0);
 	free(reqstr);
 	//brintf("from start to SEND-AFTER delay was: %ld\n",time(0)-start);

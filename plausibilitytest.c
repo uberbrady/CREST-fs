@@ -13,7 +13,7 @@ char authfile[256]="/dev/null";
 #include "resource.h"
 
 extern int
-	is_plausible_file(const char *origpath);
+	is_plausible_file(const char *origpath,int wantdatatoo);
 
 
 char *plauses[]={"Nonexistent","Unknown","Fresh"};
@@ -22,12 +22,16 @@ char *plauses[]={"Nonexistent","Unknown","Fresh"};
 int main( int argc, char **argv )
 {
 //	int i;
-	if(argc!=4) {
+	if(argc<4 || argc>5) {
 		printf("Wrong number of args: %d.\n",argc);
-		printf("Usage: %s CACHEAGE CACHEROOT /PATH-URL/without/http/leading/it/but/starting/with/slash\n",argv[0]);
+		printf("Usage: %s CACHEAGE CACHEROOT /PATH-URL/without/http/leading/it/but/starting/with/slash [WantDataToo=1]\n",argv[0]);
 		exit(1);
 	}
 	maxcacheage=atoi(argv[1]);
+	int wantdatatoo=1;
+	if(argc==5) {
+		wantdatatoo=atoi(argv[4]);
+	}
 	brintf("Max Cache Age Temporarily Configured To: %d",maxcacheage);
 /*	printf("Args are:\n");
 	for(i=0;i<argc;i++) {
@@ -35,8 +39,11 @@ int main( int argc, char **argv )
 	} */
 	char pwd[1024];
 	getcwd(pwd,1024);
-	chdir(argv[2]);
-	int p=is_plausible_file(argv[3]);
+	if(chdir(argv[2])) {
+		printf("Could not change to cache directory!\n");
+		exit(1);
+	}
+	int p=is_plausible_file(argv[3],wantdatatoo);
 	chdir(pwd);
 	printf("File: %s plausibility: %d [%s]\n",argv[2],p,plauses[p]);
 /*	char headers[65535];

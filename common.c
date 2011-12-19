@@ -12,6 +12,8 @@
 #include "common.h"
 #include "http.h"
 
+char rootdir[1024]="";
+
 //BSD-isms we have to replicate (puke, puke)
 
 #if defined(__linux__) && !defined(__dietlibc__) && !defined(__UCLIBC__)
