@@ -1,8 +1,13 @@
 FUSEINC=/usr/include/fuse
 
-PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/:/usr/bin/:/bin/:/sbin:/usr/sbin
+FUSELIB=fuse
 
-gcc=i686-linux-uclibc-gcc
+#PATH=/root/buildroot-2009.05/build_i686/staging_dir/usr/bin/:/usr/bin/:/bin/:/sbin:/usr/sbin
 
-crestfs: crestfs.static crestfs.dynamic
-	cp crestfs.static crestfs
+#gcc=i686-linux-uclibc-gcc
+
+#CFLAGS:=$(CFLAGS) -DBRINTF_FILEOUT=1 # use default printf - no locking
+# add -pg here for gprof? Not getting good data out of there right now
+
+crestfs: crestfs.dynamic
+	cp crestfs.dynamic crestfs

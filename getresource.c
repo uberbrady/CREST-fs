@@ -30,7 +30,7 @@ int main( int argc, char **argv )
 		strcpy(verb,argv[4]);
 	}
 	maxcacheage=atoi(argv[1]);
-	brintf("Max Cache Age Temporarily Configured To: %d, using HTTP verb: %s\n",maxcacheage,verb);
+	printf("Max Cache Age Temporarily Configured To: %d, using HTTP verb: %s\n",maxcacheage,verb);
 	char headers[65535];
 	int isdir;
 	char pwd[1024];

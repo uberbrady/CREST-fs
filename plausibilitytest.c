@@ -32,7 +32,7 @@ int main( int argc, char **argv )
 	if(argc==5) {
 		wantdatatoo=atoi(argv[4]);
 	}
-	brintf("Max Cache Age Temporarily Configured To: %d",maxcacheage);
+	printf("Max Cache Age Temporarily Configured To: %d",maxcacheage);
 /*	printf("Args are:\n");
 	for(i=0;i<argc;i++) {
 		printf("Arg[%d] is: %s\n",i,argv[i]);

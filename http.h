@@ -27,6 +27,9 @@ http_close(httpsocket *);
 int
 http_valid(httpsocket);
 
+int
+http_destroy(httpsocket *);
+
 int recv_headers(httpsocket *fd,char **headerpointer);
 //ALLOCATES headerpointer (fills it), and allocates and fills bodypiece and returns its size
 //bodypiece is a small chunk of the body section

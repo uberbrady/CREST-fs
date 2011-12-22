@@ -24,7 +24,7 @@ struct keepalive {
 
 pthread_mutex_t keep_mut = PTHREAD_MUTEX_INITIALIZER;
 
-#define MAXKEEP 32
+#define MAXKEEP 4
 //we want this normaly to be higher - say, 32 or so? But I lowered it to look at a bug
 
 struct keepalive keepalives[MAXKEEP];
@@ -227,7 +227,10 @@ http_request(const char *fspath,char *verb,char *etag, char *referer,char *extra
 		}
 
 		//brintf("Okay, connectication has occurenced connect-AFTER: %ld\n",time(0)-start);
-		insert_keep(hostpart,sockfd);
+		if(!insert_keep(hostpart,sockfd)) {
+			brintf("NO MORE KEEPALIVE HOLES AVAILABLE!!!! I DIE!!!!!!");
+			exit(55);
+		}
 		freeaddrinfo(servinfo); // all done with this structure
 	} else {
 		//brintf("Using kept-alive connection... keep-AFTER: %ld\n",time(0)-start);
@@ -369,6 +372,22 @@ http_close(httpsocket *sock)
 	} else {
 		brintf("ATTEMPT TO CLOSE INVALID HTTPSOCKET! Doing nothing...\n");
 		*sock=badsock; //it was already bad, but let's make it badder.
+		return 1;
+	}
+}
+
+int
+http_destroy(httpsocket *sock)
+{
+	if(http_valid(*sock) && !sock->closed) {
+		if(!delete_keep(sock->fd)) {
+			brintf("UNABLE to delete keepalive: %d\n",sock->fd);
+		}
+		close(sock->fd);
+		*sock=badsock;
+		return 0;
+	} else {
+		//didn't have a valid sock connection anyways, don't try to close or delete it
 		return 1;
 	}
 }

@@ -76,7 +76,7 @@ is_plausible_file(const char *origpath,int wantdatatoo)
 	int stale=0;
 	int definitive=0;
 	char childetag[256]="";
-	char metafilechildpath[1024];
+	char metafilechildpath[1024]=""; //just to avoid spurious valgrind message
 	struct stat dumbstat;
 	//stat datafile for origpath (just for existence, all we care about). If exists, exists=1;
 	if(lstat(origpath+1,&dumbstat)==0 || !wantdatatoo) { //do 404's drop empty data files? IF not, this will keep refreshing nonexistent files...
@@ -139,7 +139,7 @@ is_plausible_file(const char *origpath,int wantdatatoo)
 		//okay 'path' is your directory name, 'slashloc' is the item name in it
 		brintf("'New' Slashloc: %s\n",slashloc);
 		brintf("'Fixed Path': %s\n",path);
-		char metafoldbuf[1024];
+		char metafoldbuf[1024]="";
 		FILE *metaptr;
 		FILE *dataptr;
 		
@@ -349,8 +349,8 @@ void directory_freshen(const char *path,char *headers,FILE *dirfile)
 }
 */
 
-void rewrite_headers(FILE *headerfile,char *headerfilename,char *received_headers,int headerlength, char *headers)
-{
+void rewrite_headers(FILE *headerfile,char *headerfilename __attribute__((unused)),char *received_headers,int headerlength, char *headers)
+{ //when NOT run in debug mode, we need the 'attribute-unused' thing on headerfilename
 	safe_flock(fileno(headerfile),LOCK_EX,headerfilename+1); //lock upgrade!
 	int truncatestatus=ftruncate(fileno(headerfile),0); // we are OVERWRITING THE HEADERS - we got new headers, they're good, we wanna use 'em
 	rewind(headerfile); //I think I have to do this or it will re-fill with 0's?!
@@ -387,15 +387,35 @@ int crestfs_header_check(char *received_headers)
 	return 1;
 }
 
-int dont_fclose(FILE *f)
-{
-	brintf("actually fclosing File: %p\n",f);
-	return fclose(f);
-}
-
 #define MAXTRIES 5
 
 FILE *BADFILE=((FILE *)-1);
+
+#ifdef NAIVE
+//designed for testing 'what if' scenarios like - what if _get_resource were super-duper fast?
+FILE *
+	_get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode,int count)
+{
+	datafile_for_path(path);
+	struct stat stbuf;
+	lstat(filepath,&stbuf);
+	//NB - if headers && headerlength, we need to fill that in with somethign believable.
+	switch(stbuf.modething) {
+		case directory:
+		//this one is hard - we'd try to read_Dir and we'd be iterating through the contents.
+		//does it make enough sense to fake it? Or should we do a #ifdef NAIVE version of the directory iterators?
+		break;
+		
+		case file:
+		//easy
+		break;
+		
+		case symlink
+		//easy
+		break;
+	}
+}
+#else
 
 FILE *
 _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode,int count)
@@ -585,7 +605,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 					if(headers && headerlength>0) {
 						strncpy(headers,headerbuf,headerlength);
 					}
-					dont_fclose(headerfile); //RELEASE LOCK!!!!!
+					safe_fclose(headerfile); //RELEASE LOCK!!!!!
 					/* this is enormously bad. Do'nt do this.
 					if(dirmode) {
 						brintf("FRESHENING OFF OF CACHE HIT! path: %s, headers: %s, ptr: %p\n",path,headerbuf,tmp);
@@ -604,7 +624,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 				if(headers && headerlength >0) {
 					strncpy(headers,headerbuf,headerlength);
 				}
-				dont_fclose(headerfile); //releasing that same lock...
+				safe_fclose(headerfile); //releasing that same lock...
 				free(headerbuf);
 				return 0;
 			}
@@ -684,8 +704,8 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 					brintf("(HEADERBUF SEZ: %s)\n",headerbuf);
 					directory_freshen(path,headerbuf,datafile);
 				}
-				brintf("Bout to dont_fclose\n");
-				dont_fclose(headerfile); // RELEASE LOCK
+				brintf("Bout to safe_fclose\n");
+				safe_fclose(headerfile); // RELEASE LOCK
 				free(received_headers);
 				free(headerbuf);
 				http_close(&mysocket);
@@ -701,10 +721,13 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 				}
 				rewrite_headers(headerfile,headerfilename,received_headers, headerlength, headers);
 				if(strcmp(selectedverb,"HEAD")==0) {
-					dont_fclose(headerfile); //RELEASE LOCK!
+					safe_fclose(headerfile); //RELEASE LOCK!
 					free(received_headers);
-					brintf("DUDE TOTALLY SUCKY!!!! Somebody HEAD'ed a resource and we had to unlink its data file.\n");
-					unlink(cachefilebase+1);
+					struct stat havetounlink;
+					if(lstat(cachefilebase+1,&havetounlink)==0) {
+						brintf("DUDE TOTALLY SUCKY!!!! Somebody HEAD'ed a resource and we *had* to unlink its data file, because we had one before!.\n");
+						unlink(cachefilebase+1);
+					}
 					http_close(&mysocket);
 					free(headerbuf);
 					return 0;// NO CONTENTS TO DEAL WITH HERE!
@@ -733,7 +756,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 					brintf("DIRMODE - FRSHEN %s!\n",path);
 					directory_freshen(path,received_headers,datafile);
 				}
-				dont_fclose(headerfile); //RELEASE LOCK
+				safe_fclose(headerfile); //RELEASE LOCK
 				free(received_headers);
 				free(headerbuf);
 				http_close(&mysocket);
@@ -753,6 +776,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 				//NB. Requires a change to readlink()
 				//there is NO datafile to work with here, but we don't return 0...how's that gonna work?
 				wastebody(mysocket);
+				http_close(&mysocket);
 
 				fetchheader(received_headers,"location",location,1024);
 			
@@ -773,13 +797,12 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 					mkdir(cachefilebase+1,0700); 
 					unlink(headerfilename+1); //the headerfile being a file will mess things up too
 								//and besides, it's just going to say '301', which isn't helpful
-					dont_fclose(headerfile);
+					safe_fclose(headerfile); //RELEASE LOCK
 					free(received_headers);
 					char modpurpose[1024];
 					strlcpy(modpurpose,purpose,1024);
 					strlcat(modpurpose,"+directoryrefetch",1024);
 					free(headerbuf);
-					http_close(&mysocket);
 					//TEMP WORKAROUND FIX FOR POSSIBLE BUG ISOLATION STUFF?!
 					//delete_keep(mysocket);
 					//close(mysocket);
@@ -801,6 +824,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 						//relative symlink. Either relative to _SERVER_ root, or relative to dirname...
 						if(location[0]=='/') {
 							brintf("No absolute directory-relative symlinks yet, sorry\n");
+							safe_fclose(headerfile);
 							return BADFILE;
 						} else if(strlen(location)>0) {
 							strlcpy(buf,rootdir,bufsize); //fs cache 'root'
@@ -813,6 +837,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 						} else {
 							strlcpy(buf,rootdir,bufsize); //fs cache 'root'
 							brintf("Unsupported protocol, or missing 'location' header: %s\n",location);
+							safe_fclose(headerfile);
 							return BADFILE;
 						}
 					} else {
@@ -841,13 +866,12 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 						int linkstat=symlink(buf,path+1); (void)linkstat;
 						brintf("Going to return link path as: %s (unlink status: %d, link status: %d)\n",buf,unlinkstat,linkstat);
 					}
-					dont_fclose(headerfile); //release lock
+					safe_fclose(headerfile); //release lock
 					free(received_headers);
 					free(headerbuf);
-					http_close(&mysocket);
 					return 0; //do we return a filepointer to an empty file or 0? NOT SURE!
 				}
-				break;
+				break; //300-series clause (http_close was called up near the top)
 
 				case 404:
 				if(!crestfs_header_check(received_headers)) {
@@ -859,7 +883,6 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 
 				//be prepared to drop a 404 cachefile! This will prevent repeated requests for nonexistent entities
 				if(dirmode) {
-					wastebody(mysocket);
 					//we 404'ed (or 403'ed) in dirmode. Shit.
 					char headerdirname[1024];
 					brintf("Directory mode resulted in 404. Retrying as regular file...\n");
@@ -874,9 +897,10 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 					char modpurpose[1024];
 					strlcpy(modpurpose,purpose,1024);
 					strlcat(modpurpose,"+plainrefetch",1024);
+					wastebody(mysocket);
 					http_close(&mysocket);
 					free(headerbuf);
-					if (headerfile) dont_fclose(headerfile); //need this?! release lock?
+					if (headerfile) safe_fclose(headerfile); //need this?! release lock?
 					return _get_resource(path,headers,headerlength,isdirectory,preferredverb,modpurpose,cachefilemode,count);
 				}
 				//file mode - must invalidate parent directory if it said I should be here.
@@ -901,7 +925,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 				wastebody(mysocket);
 				brintf("404/403/401 mode, I *may* be closing the cache header file...\n");
 				if(headerfile) {
-					int closeresults=dont_fclose(headerfile);
+					int closeresults=safe_fclose(headerfile); //release lock!
 					(void)closeresults;
 					brintf(" Results: %d\n",closeresults); //Need to release locks on 404's too!
 				} else {
@@ -916,12 +940,12 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 				default:
 				//we don't want to rewrite the headers in this case.
 				brintf("Unknown HTTP status (%d): %s\n",status,received_headers);
-				http_close(&mysocket); //SOMETHING HARSHER HERE PERHAPS?!
+				http_destroy(&mysocket);
 				//return_keep(mysocket);
 				free(headerbuf);
 				free(received_headers);
 				if(headerfile) {
-					dont_fclose(headerfile); //release lock!if you have it...
+					safe_fclose(headerfile); //release lock!if you have it...
 				}
 				if(status>=500 && status<600) {
 					brintf("Retrying 500-series error: %d - attempt #%d\n",status,count);
@@ -939,7 +963,10 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 			*/
 			brintf("Past block for receiving data, strerror says: %s\n",strerror(errno));
 			free(received_headers);
-		} //end if clause as to whether we got a valid response on recv_headers
+		} else { //end if clause as to whether we got a valid response on recv_headers
+			//we have a *VALID* http_socket, but we *don't* have valid headers. Let's toss this connection
+			http_destroy(&mysocket);
+		}
 	}  //end whether or not http conneciton is valid 
 	//if things went remotely well and internet-connectedly, you shouldn't end up here.
 	//if you did, something screwed up. Try to at least return a cachefile or something.
@@ -970,9 +997,11 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 	} else {
 		brintf("Either couldn't stat cache or cache ain't a plain file: %s\n",strerror(errno));
 	}
-	dont_fclose(headerfile); //RELEASE LOCK!
-	brintf("dont_fclose'd headerfile\n");
+	safe_fclose(headerfile); //RELEASE LOCK!
+	brintf("safe_fclose'd headerfile\n");
 	brintf("About to return data file: %p\n",staledata);
 	http_close(&mysocket);
 	return staledata;
 }
+
+#endif

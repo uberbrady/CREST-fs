@@ -22,7 +22,23 @@ void putfile_for_path(const char *path,char*buffer, int buflen);
 
 void putdir_for_path(const char *path,char*buffer,int buflen);
 
-int safe_flock(int filenum,int lockmode,char *filename);
+#ifndef SHUTUP
+
+#define safe_flock(filenum,lockmode,filename) _safe_flock(filenum,lockmode,filename,__FILE__,__LINE__)
+
+int _safe_flock(int filenum,int lockmode,char *filename,char *sourcefile,int);
+
+#define safe_fclose(f) _safe_fclose(f,__FILE__,__LINE__)
+
+int _safe_fclose(FILE *f, char *sourcefile,int linenum);
+
+#else
+
+#define safe_flock(filename,lockmode,sourcefile) flock(filename,lockmode)
+
+#define safe_fclose(f) fclose(f)
+
+#endif
 
 void pathparse(const char *path,char *hostname,char *pathonly,int hostlen,int pathlen);
 
@@ -43,6 +59,12 @@ void directoryname(const char *path,char *dirbuf, int dirbufsize,char *basebuf, 
 #if defined(__apple__)
 FILE *
 fmemopen(void *buf, size_t size, const char *mode)
+#endif
+
+#if defined (USE64)
+#define FILEPTR(x)   ((FILE *)x)
+#else
+#define FILEPTR(x)   ((FILE *)(int)x)
 #endif
 
 void redirmake(const char *path);

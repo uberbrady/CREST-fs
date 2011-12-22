@@ -1,8 +1,6 @@
 
-include Makefile.mac
+CFLAGS=-D_FILE_OFFSET_BITS=64 -O2 -g
 
-
-CFLAGS=-D_FILE_OFFSET_BITS=64 -O2 -g 
 # -g
 # -DNOIMPOSSIBLE 
 # -DSHUTUP
@@ -11,7 +9,13 @@ CFLAGS=-D_FILE_OFFSET_BITS=64 -O2 -g
 #only want this for the Static builds, not the regular Dynamic ones.
 #SILENCE=-DSHUTUP
 # Silly. I just changed the Make rules so this shouldn't have to be messed with anymore. I'm leaving it here anyways.
-SILENCE=
+
+include Makefile.mac
+
+ifdef USE64
+	CFLAGS:=$(CFLAGS) -DUSE64
+endif
+
 
 .PHONY: ALL testdriven clean
 

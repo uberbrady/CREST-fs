@@ -130,7 +130,10 @@ char mingie[65535]="";
 
 #ifndef SHUTUP
 
+#if BRINTF_THREADLOCKED == 1
 #include <pthread.h>
+
+//THREADLOCKED BRINTF - why the FUCK was I doing this?!
 
 void brintf(char *format,...)
 {
@@ -142,8 +145,9 @@ void brintf(char *format,...)
 	fflush(NULL);
 	pthread_mutex_unlock(&oneprint);
 }
-
-/* void brintf(char *format,...)
+#elif BRINTF_FILEOUT == 1
+//FILE-OUT BRINTF - good for when you're going to NOT be running in single-thread/debug mode
+void brintf(char *format,...)
 {
 	va_list myargs;
 	va_start(myargs,format);
@@ -158,8 +162,20 @@ void brintf(char *format,...)
 	vfprintf(myfp,format,myargs);
 	fflush(myfp);
 }
-*/
 
+#else
+
+//TRIVIAL BRINTF
+void brintf(char *format,...)
+{
+	va_list myargs;
+	va_start(myargs,format);
+	vprintf(format,myargs);
+	va_end(myargs);
+	fflush(stdout);
+}
+
+#endif
 
 void manglefinder(char *string,int lineno)
 {
@@ -779,10 +795,11 @@ append_parents(const char *origpath)
 
 #include <sys/file.h> //for flock params.
 
-int safe_flock(int filenum,int lockmode,char *filename)
+#ifndef SHUTUP
+int _safe_flock(int filenum,int lockmode,char *filename,char *sourcefile,int linenum)
 {
 //return 0;
-	int lockresults=flock(filenum,lockmode|LOCK_NB);
+/*	int lockresults=flock(filenum,lockmode|LOCK_NB);
 	if(lockresults==0) {
 		printf("LOCK: Lock attempt on %s succeeded!\n",filename);
 		return 0; //good.
@@ -796,7 +813,23 @@ int safe_flock(int filenum,int lockmode,char *filename)
 		attempts++;
 	}
 	return lockresults; //will be 0 on success, -1 otherwise...
+	*/
+	int lockresults=flock(filenum,lockmode|LOCK_NB);
+	if(lockresults==0) {
+		brintf("LOCK: Lock attempt (Lockmode: %d) on %s succeeded at %s:%d)!\n",lockmode,filename,sourcefile,linenum);
+		return 0;
+	}
+	brintf("LOCK: FAIL - Lock attempt (Lockmode: %d) failed to lock %s, locking 'hard' at %s:%d...\n",lockmode,filename,sourcefile,linenum);
+	return flock(filenum,lockmode); //may nevar return....
 }
+
+int _safe_fclose(FILE *f,char *sourcefile, int linenum)
+{
+	brintf("actually fclosing File: %p, called from %s:%d\n",f,sourcefile,linenum);
+	return fclose(f);
+}
+
+#endif
 
 #include <dirent.h>
 #include <sys/file.h>
@@ -932,7 +965,7 @@ handle_hash_make(char *name)
 	} else {
 		//plain file?
 		contentfile=fopen(linktarget+3,"r");
-		asprintf(&headerplus,"Content-length: %lld",st.st_size);
+		asprintf(&headerplus,"Content-length: %ld",(long)st.st_size);
 	}
 	//brintf("Content file is: %s (%p)\n",linktarget+3,contentfile);
 	

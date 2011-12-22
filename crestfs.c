@@ -252,9 +252,9 @@ crest_open(const char *path, struct fuse_file_info *fi)
 static int
 crest_release(const char *path __attribute__ ((unused)), struct fuse_file_info *fi)
 {
-	brintf("Closing filehandle %p: for file: %s\n",(FILE *)fi->fh,path);
+	brintf("Closing filehandle %p: for file: %s\n",FILEPTR(fi->fh),path);
 	if(fi->fh) {
-		return fclose((FILE *)fi->fh);
+		return fclose(FILEPTR(fi->fh));
 	} else {
 		return 0;
 	}
@@ -394,7 +394,7 @@ crest_read(const char *path __attribute__ ((unused)), char *buf, size_t size, of
 		brintf("File was not properly opened?\n");
 		return -EIO;
 	}
-	cachefile=(FILE *)fi->fh;
+	cachefile=FILEPTR(fi->fh);
 	
 	if(cachefile) {
 		if(fseek(cachefile,offset,SEEK_SET)==0) {
@@ -418,7 +418,7 @@ crest_write(const char *path, const char *buf, size_t size, off_t offset, struct
 		brintf("File Info is ZERO for path: %s\n",path);
 		return -EIO;
 	}
-	FILE *cachefile=(FILE *)fi->fh;
+	FILE *cachefile=FILEPTR(fi->fh);
 	//need to prolly flock() the *metadata* file or something here?
 	char metafilename[1024];
 	metafile_for_path(path,metafilename,1024,0);
@@ -1087,8 +1087,8 @@ main(int argc, char **argv)
 	/////////addparam(&myargc,&myargs,"-r"); //no longer so nasty about read-only...areas indicated by teh authfile are NOT
 	// -s ? -f ? -d ? 
 	#ifdef __APPLE__
-	addparam(&myargc,&myargs,"-o");
-	addparam(&myargc,&myargs,"nolocalcaches");
+//	addparam(&myargc,&myargs,"-o");
+//	addparam(&myargc,&myargs,"nolocalcaches");
 	addparam(&myargc,&myargs,"-o");
 	addparam(&myargc,&myargs,"daemon_timeout=300"); //need higher daemon timeout for Mac OS X - 60 seconds is too tight
 	#else
