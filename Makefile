@@ -17,7 +17,7 @@ ifdef USE64
 endif
 
 
-.PHONY: ALL testdriven clean
+.PHONY: ALL clean
 
 ALL: crestfs
 
@@ -53,12 +53,12 @@ http.static.o: http.c http.h Makefile
 
 
 
-crestfs.dynamic: crestfs.o resource.o common.o Makefile http.o
+crestfs.dynamic: crestfs.o resource.o common.o Makefile http.o worker.o
 	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
-	gcc -g -pg -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o http.o -l$(FUSELIB) -lpthread
+	gcc -g -pg -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o http.o worker.o -l$(FUSELIB) -lpthread
 	#gcc -static -g -Wall -Werror -o crestfs.static crestfs.o -lfuse
 
-crestfs.o: crestfs.c Makefile http.h common.h
+crestfs.o: crestfs.c Makefile http.h common.h worker.h
 	#diet gcc -g -Wall -Werror -c -o crestfs.o crestfs.c
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o crestfs.o crestfs.c
 
@@ -71,16 +71,19 @@ common.o: common.c common.h resource.h Makefile http.h
 http.o: http.c http.h Makefile
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o http.o http.c
 
+worker.o: worker.c worker.h
+	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -c -o worker.o worker.c
+
 plausibilitytest.o: plausibilitytest.c resource.h common.h
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o plausibilitytest.o plausibilitytest.c
 
-plausibilitytest: http.o common.o resource.o plausibilitytest.o
+plausibilitytest: http.o common.o resource.o plausibilitytest.o worker.o
 	gcc -g -pg -Wall -W -Werror -o plausibilitytest http.o common.o resource.o plausibilitytest.o -l$(FUSELIB) -lpthread 
 
 getresource.o: getresource.c resource.h
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o getresource.o getresource.c
 
-getresource: http.o common.o resource.o getresource.o
+getresource: http.o common.o resource.o getresource.o worker.o
 	gcc -g -pg -Wall -W -Werror -o getresource http.o common.o resource.o getresource.o -l$(FUSELIB) -lpthread
 
 
@@ -94,14 +97,5 @@ test: crestfs.static
 debug: crestfs.static
 	gdb --args ./crestfs.static /tmp/doodle /tmp/cachetest 60 -s -d -f 
 
-testdriven: crestfs.testframework
-	cd /tmp/crestotesto && ~/universix/CREST-fs/crestfs.testframework /desk.nu/testdir HEAD
-	cd /tmp/crestotesto && gdb --args ~/universix/CREST-fs/crestfs.testframework /desk.nu/testdir/stupid/dumb/weird GET
-	cd ~/universix/CREST-fs
-
-crestfs.testframework: crestfs.c Makefile
-	$(gcc) -g -Wall -Werror -idirafter $(FUSEINC) -c -DTESTFRAMEWORK -o crestfs.testframework.o crestfs.c
-	$(gcc) -static -g -Wall -Werror -o crestfs.testframework crestfs.testframework.o libfuse.a -lpthread -ldl
- 
 clean:
 	rm *.o crestfs.static crestfs.dynamic crestfs

@@ -29,6 +29,8 @@
 
 #include <pthread.h>
 
+#include "worker.h"
+
 //global variables (another one is down there but it's use is jsut there.
 char cachedirname[1024]="";
 int maxcacheage=-1;
@@ -468,7 +470,13 @@ crest_init(struct fuse_conn_info *conn __attribute__((unused)) )
 		printf("Write Thread Created\n");
 	} else {
 		printf("WRITE SUPPORT DISABLED VIA /dev/null AUTHFILE\n");
-	}	
+	}
+	if(init_resources()==0) {
+		brintf("Resource subsystem initted\n");
+	} else {
+		perror("Could not initialize resource system\n");
+		exit(42);
+	}
 	return 0;
 }
 
@@ -1018,8 +1026,6 @@ addparam(int *argc,char ***argv,char *string)
 	//brintf("\n");
 }
 
-#ifndef TESTFRAMEWORK
-
 char authfile[256];
 
 #ifdef gnulibc
@@ -1103,28 +1109,10 @@ main(int argc, char **argv)
 	char *myargs[]= {0, 0, "-r", "-s", "-f", "-d", "-o", "nonempty", 0 };
 	#define ARGCOUNT 8
 	#endif */
+	unlink("/tmp/crestfs.sock");
+	if(fork()==0) {
+		run_worker("/tmp/crestfs.sock");
+	}
+	init_resources();
 	return fuse_main(myargc, myargs, &crest_filesystem_operations, NULL);
 }
-#else
-int
-main(int argc, char **argv)
-{
-	char headers[65535];
-	char teenybuffer;
-	FILE *resource=0;
-	int isdirectory=-1;
-	void *stupid=crest_filesystem_operations.init; //just to keep from complaining
-	//FILE *get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb)
-	resource=get_resource(argv[1],headers,65535,&isdirectory,argv[2],"testing");
-	printf("IS Directory?: %d\n",isdirectory);
-	if(resource) {
-		while(fread(&teenybuffer,1,1,resource)) {
-			printf("%c",teenybuffer);
-		}
-	} else {
-		printf("NO RESOURCE FOUND. 'k?");
-	}
-	isdirectory=(int)stupid;
-	return 0;
-}
-#endif

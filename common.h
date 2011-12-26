@@ -36,7 +36,7 @@ int _safe_fclose(FILE *f, char *sourcefile,int linenum);
 
 #define safe_flock(filename,lockmode,sourcefile) flock(filename,lockmode)
 
-#define safe_fclose(f) fclose(f)
+#define safe_fclose(f) flock(fileno(f),LOCK_UN);fclose(f)
 
 #endif
 

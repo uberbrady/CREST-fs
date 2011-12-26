@@ -32,6 +32,8 @@
 #include "resource.h"
 #include "common.h"
 #include "http.h"
+
+#include "worker.h"
 //path will look like "/domainname.com/directoryname/file" - with leading slash
 
 /*
@@ -417,9 +419,130 @@ FILE *
 }
 #else
 
+
+#include <pthread.h>
+pthread_key_t socketkey;
+int resources_initted=0;
+
+void finalclose(void *tls)
+{
+	brintf("Final close - tls is: %p\n",tls);
+	//close((int)tls);
+}
+
+int init_resources(void) {
+	int kc=pthread_key_create(&socketkey, finalclose);
+	resources_initted=(kc==0);
+	printf("pthread_key_create says: %d\n",kc);
+	return kc;
+}
+
+#include <sys/socket.h>
+#include <sys/un.h>
+
 FILE *
 _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode,int count)
 {
+	//handle back-end unix domain socket connection via thread-local storage.
+	if(!resources_initted) { //is the TLS stuff initted?
+		printf("Resources subsystem not initted. Aborting\n");
+		exit(42);
+	}
+	brintf("GET_RESOURCE: %s %s (%s)\n",preferredverb,path,purpose);
+	void *spec=pthread_getspecific(socketkey);
+	if(spec==0) { //do we already have a connection for this thread?
+		brintf("pthread_specific data is empty, opening connection to socket\n");
+    int s, len;
+    struct sockaddr_un remote;
+
+    if ((s = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+        perror("thread specific socket()");
+        exit(1);
+    }
+
+    printf("Trying to connect...\n");
+
+    remote.sun_family = AF_UNIX;
+    strcpy(remote.sun_path, "/tmp/crestfs.sock");
+    len = strlen(remote.sun_path) + sizeof(remote.sun_family)+1; //+1??!!?
+    if (connect(s, (struct sockaddr *)&remote, len) == -1) {
+        perror("thread-specific socket connect()");
+        exit(1);
+    }
+    printf("Connected.\n");
+		spec=(void*)(long)s;
+		pthread_setspecific(socketkey,spec);
+	}
+	//now we know we have a connection for this thread
+	
+	//send Socket Request...
+	request_t req;
+	strlcpy(req.resource,path,1024);
+	strlcpy(req.purpose,purpose,128);
+	if(strcmp(preferredverb,"HEAD")==0) {
+		req.headers_only=1;
+	} else {
+		req.headers_only=0;
+	}
+	if(strcmp(cachefilemode,"r")==0) {
+		req.read_only=1;
+	} else if(strcmp(cachefilemode,"r+")==0) {
+		req.read_only=0;
+	} else {
+		printf("Bizarre mode selected: '%s'\n",cachefilemode);
+		exit(15);
+	}
+	int bytessent=send((int)(long)spec,&req,sizeof(req),0);
+	if(bytessent!=sizeof(req)) {
+		brintf("Sent %d bytes, wanted %ld\n",bytessent,sizeof(req));
+	}
+	
+	//receive socket response...
+	response_t resp;
+	struct msghdr msg;
+	struct iovec msg_iov;
+	msg_iov.iov_base=&resp;
+	msg_iov.iov_len=sizeof(resp);
+	msg.msg_iov=&msg_iov;
+	msg.msg_iovlen=1;
+	char ancillary_element_buffer[CMSG_SPACE(sizeof(int))];
+  msg.msg_control = ancillary_element_buffer;
+  msg.msg_controllen = CMSG_SPACE(sizeof(int));
+  
+	int bytesrecv=recvmsg((int)(long)spec,&msg,/* MSG_CMSG_CLOEXEC*/0); //I don't know what that would mean
+	if(bytesrecv==sizeof(resp)) {
+		brintf("GET_RESOURCE RESPONSE FOR %s, Filetype: %d, Moddate: %d, Filesize: %ld\n",path,resp.filetype,resp.moddate,resp.size);
+		struct cmsghdr *control_message = NULL;
+		int sent_fd=-1;
+		
+		for(control_message = CMSG_FIRSTHDR(&msg);
+       control_message != NULL;
+       control_message = CMSG_NXTHDR(&msg, control_message))
+		{
+   		if( (control_message->cmsg_level == SOL_SOCKET) &&
+       	(control_message->cmsg_type == SCM_RIGHTS) )
+   		{
+    		sent_fd = *((int *) CMSG_DATA(control_message));
+   		}
+  	}
+		if(sent_fd!=-1) {
+			brintf("GET_RESOURCE - File descriptor recieved, value is: %d, closing...",sent_fd);
+			if(close(sent_fd)==0) {
+				brintf("CLOSE OK!\n");
+			} else {
+				brintf("Close FAIL :%s\n",strerror(errno));
+			}
+		} else {
+			brintf("File descriptor looks bad, value is: %d\n",sent_fd);
+		}
+	} else {
+		brintf("GET_RESOURCE RESPONSE FAIL %s - Received %d bytes, wanted %ld\n",path,bytesrecv,sizeof(resp));
+	}
+
+
+
+
+	//legacy method, blocking - 
 	//first, check cache. How's that looking?
 	struct stat cachestat;
 	char webresource[1024];

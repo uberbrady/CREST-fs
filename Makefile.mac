@@ -4,11 +4,9 @@ FUSELIB=fuse4x
 
 USE64=true
 
-SILENCE=-DSHUTUP
+#SILENCE=-DSHUTUP
 
-CFLAGS:=$(CFLAGS)
-
-# -DBRINTF_FILEOUT=1
+CFLAGS:=$(CFLAGS) -DBRINTF_FILEOUT=1
 
 gcc=/usr/bin/gcc
 #gcc seems not to be 'predefined' on Mac

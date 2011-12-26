@@ -1,3 +1,6 @@
+
+int init_resources(void);
+
 extern FILE *BADFILE;
 
 #define get_resource(path,headers,headerlength,isdirectory,preferredverb,purpose,cachefilemode) _get_resource(path,headers,headerlength,isdirectory,preferredverb,purpose,cachefilemode,0)

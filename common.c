@@ -159,6 +159,15 @@ void brintf(char *format,...)
 			exit(22);
 		}
 	}
+	struct stat outstat;
+	if(fstat(fileno(myfp),&outstat)==0) {
+		if(outstat.st_size> 1024*1024*1024*1) {
+			fprintf(myfp,"ERROR - DEBUG LOG TOO BIG. NO MORE OUTPUT!\n");
+			fclose(myfp);
+			return;
+		}
+	}
+	
 	vfprintf(myfp,format,myargs);
 	fflush(myfp);
 }
@@ -794,6 +803,8 @@ append_parents(const char *origpath)
 }
 
 #include <sys/file.h> //for flock params.
+#include <fcntl.h> //for fcntl, which actually implements this
+
 
 #ifndef SHUTUP
 int _safe_flock(int filenum,int lockmode,char *filename,char *sourcefile,int linenum)
@@ -814,17 +825,46 @@ int _safe_flock(int filenum,int lockmode,char *filename,char *sourcefile,int lin
 	}
 	return lockresults; //will be 0 on success, -1 otherwise...
 	*/
-	int lockresults=flock(filenum,lockmode|LOCK_NB);
+	struct flock myflock;
+	myflock.l_start=0;
+	myflock.l_len=0;
+//	myflock.l_type=
+	myflock.l_whence=SEEK_SET;
+	
+	switch(lockmode) {
+		case LOCK_SH:
+		myflock.l_type=F_RDLCK;
+		break;
+		
+		case LOCK_EX:
+		myflock.l_type=F_WRLCK;
+		break;
+	}
+	
+	int lockresults=fcntl(filenum,F_SETLK,&myflock);
 	if(lockresults==0) {
-		brintf("LOCK: Lock attempt (Lockmode: %d) on %s succeeded at %s:%d)!\n",lockmode,filename,sourcefile,linenum);
+		brintf("LOCK: Lock attempt (Lockmode: %d) on %s succeeded at (%s:%d)!\n",lockmode,filename,sourcefile,linenum);
 		return 0;
 	}
-	brintf("LOCK: FAIL - Lock attempt (Lockmode: %d) failed to lock %s, locking 'hard' at %s:%d...\n",lockmode,filename,sourcefile,linenum);
-	return flock(filenum,lockmode); //may nevar return....
+	
+	brintf("LOCK: FAIL - Lock attempt (Lockmode: %d) failed to lock %s (%s:%d), locking 'hard' at %s:%d...\n",lockmode,filename,strerror(errno),errno,sourcefile,linenum);
+	struct flock prevlock=myflock;
+	fcntl(filenum,F_GETLK,&prevlock);
+	brintf("Lock - why did it fail? Well, because of PID: %d, type: %s\n",prevlock.l_pid,prevlock.l_type==F_RDLCK ? "F_RDLCK": "F_WRLCK");
+	return fcntl(filenum,F_SETLKW,&myflock); //may nevar return....
 }
 
 int _safe_fclose(FILE *f,char *sourcefile, int linenum)
 {
+	struct flock unlockme;
+	unlockme.l_type=F_UNLCK;
+	unlockme.l_start=0;
+	unlockme.l_len=0;
+	unlockme.l_whence=SEEK_SET;
+
+	if(fcntl(fileno(f),F_SETLKW,&unlockme)) {
+		brintf("FAILURE unlocking file for %s(%d) - ",strerror(errno),errno);
+	}
 	brintf("actually fclosing File: %p, called from %s:%d\n",f,sourcefile,linenum);
 	return fclose(f);
 }

@@ -30,6 +30,16 @@ pthread_mutex_t keep_mut = PTHREAD_MUTEX_INITIALIZER;
 struct keepalive keepalives[MAXKEEP];
 int curkeep=0;
 
+void
+debug_keep(void)
+{
+	int i;
+	brintf("%d total keepalives in use, Maximum is: %d\n",curkeep,MAXKEEP);
+	for(i=0;i<curkeep;i++) {
+		brintf("[%d]: %s - %s - FD: #%d\n",i,keepalives[i].host,keepalives[i].inuse ? "IN USE": "IDLE",keepalives[i].fd);
+	}
+}
+
 int
 find_keep(char *hostname)
 {
@@ -142,6 +152,8 @@ httpsocket badsock={-1,0,0,0,unknown_encoding,0,0};
 httpsocket
 http_request(const char *fspath,char *verb,char *etag, char *referer,char *extraheaders,FILE *body)
 {
+	brintf("BEGIN http_request\n");
+	debug_keep();
 	char hostpart[1024]="";
 	char pathpart[1024]="";
 	pathparse(fspath,hostpart,pathpart,1024,1024);
