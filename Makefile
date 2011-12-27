@@ -53,9 +53,9 @@ http.static.o: http.c http.h Makefile
 
 
 
-crestfs.dynamic: crestfs.o resource.o common.o Makefile http.o worker.o
+crestfs.dynamic: crestfs.o resource.o common.o Makefile http.o worker.o metacache.o
 	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
-	gcc -g -pg -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o http.o worker.o -l$(FUSELIB) -lpthread
+	gcc -g -pg -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o http.o worker.o metacache.o -l$(FUSELIB) -lpthread
 	#gcc -static -g -Wall -Werror -o crestfs.static crestfs.o -lfuse
 
 crestfs.o: crestfs.c Makefile http.h common.h worker.h
@@ -74,11 +74,19 @@ http.o: http.c http.h Makefile
 worker.o: worker.c worker.h
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -c -o worker.o worker.c
 
+metacache.o: worker.h metacache.h
+	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -c -o metacache.o metacache.c
+
+
+
+
 plausibilitytest.o: plausibilitytest.c resource.h common.h
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o plausibilitytest.o plausibilitytest.c
 
 plausibilitytest: http.o common.o resource.o plausibilitytest.o worker.o
 	gcc -g -pg -Wall -W -Werror -o plausibilitytest http.o common.o resource.o plausibilitytest.o -l$(FUSELIB) -lpthread 
+
+
 
 getresource.o: getresource.c resource.h
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o getresource.o getresource.c
