@@ -1,5 +1,5 @@
 
-int init_resources(void);
+int init_thread_resources(void);
 
 extern FILE *BADFILE;
 
@@ -7,4 +7,4 @@ extern FILE *BADFILE;
 
 FILE *_get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *mode,int count);
 
-
+FILE *new_get_resource(const char *path,const char *preferredverb,char *purpose,char *cachefilemode,response_t *resp);

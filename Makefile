@@ -1,6 +1,6 @@
 
 CFLAGS=-D_FILE_OFFSET_BITS=64 -O2 -g
-
+WORKERCFLAGS := $(CFLAGS) -DBRINTF_FILEOUT=1
 # -g
 # -DNOIMPOSSIBLE 
 # -DSHUTUP
@@ -53,9 +53,9 @@ http.static.o: http.c http.h Makefile
 
 
 
-crestfs.dynamic: crestfs.o resource.o common.o Makefile http.o worker.o metacache.o
+crestfs.dynamic: crestfs.o resource.o common.o Makefile http.o worker.o metacache.o transfers.o async_http.o
 	#diet ld -static -o crestfs crestfs.o libfuse.a -lc -lpthread -ldl
-	gcc -g -pg -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o http.o worker.o metacache.o -l$(FUSELIB) -lpthread
+	gcc -g -pg -Wall -Werror -o crestfs.dynamic crestfs.o resource.o common.o http.o worker.o metacache.o transfers.o async_http.o -l$(FUSELIB) -lpthread
 	#gcc -static -g -Wall -Werror -o crestfs.static crestfs.o -lfuse
 
 crestfs.o: crestfs.c Makefile http.h common.h worker.h
@@ -71,12 +71,17 @@ common.o: common.c common.h resource.h Makefile http.h
 http.o: http.c http.h Makefile
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o http.o http.c
 
-worker.o: worker.c worker.h
-	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -c -o worker.o worker.c
+worker.o: worker.c worker.h transfers.h
+	gcc $(WORKERCFLAGS) $(SILENCE) -Wall -W -Werror -c -o worker.o worker.c
 
-metacache.o: worker.h metacache.h
-	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -c -o metacache.o metacache.c
+metacache.o: worker.h metacache.h metacache.c
+	gcc $(WORKERCFLAGS) $(SILENCE) -Wall -W -Werror -c -o metacache.o metacache.c
 
+transfers.o: transfers.c transfers.h async_http.h
+	gcc $(WORKERCFLAGS) $(SILENCE) -Wall -W -Werror -c -o transfers.o transfers.c
+
+async_http.o: async_http.c async_http.h
+	gcc $(WORKERCFLAGS) $(SILENCE) -Wall -W -Werror -c -o async_http.o async_http.c
 
 
 
@@ -91,8 +96,9 @@ plausibilitytest: http.o common.o resource.o plausibilitytest.o worker.o
 getresource.o: getresource.c resource.h
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o getresource.o getresource.c
 
-getresource: http.o common.o resource.o getresource.o worker.o
-	gcc -g -pg -Wall -W -Werror -o getresource http.o common.o resource.o getresource.o -l$(FUSELIB) -lpthread
+getresource: http.o common.o resource.o getresource.o worker.o metacache.o transfers.o async_http.o
+	gcc -g -pg -Wall -W -Werror -o getresource http.o common.o resource.o getresource.o worker.o metacache.o transfers.o async_http.o -l$(FUSELIB) -lpthread 
+
 
 
 test: crestfs.static

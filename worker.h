@@ -1,4 +1,4 @@
-void run_worker(char *socketname);
+void init_worker(char *socketname,char *cachepath);
 
 typedef struct {
 	char resource[1024];
@@ -11,6 +11,7 @@ typedef struct {
 
 typedef enum {
 	NoFile=0,
+	IOError,
 	File,
 	Directory, //HTML-style directory listing
 	Manifest, //Manifest directory listing
@@ -27,3 +28,4 @@ typedef struct {
 //YOUR job to close it. Nyah.
 } response_t;
 
+char *debug_response(response_t *resp,char *context); //returns a NEW MALLOC STRING - YOU MUST free() IT!

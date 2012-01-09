@@ -23,13 +23,13 @@
 
 #include <strings.h>
 
+#include "worker.h"
 #include "resource.h"
 #include "common.h"
 #include "http.h"
 
 #include <pthread.h>
 
-#include "worker.h"
 
 //global variables (another one is down there but it's use is jsut there.
 char cachedirname[1024]="";
@@ -471,7 +471,7 @@ crest_init(struct fuse_conn_info *conn __attribute__((unused)) )
 	} else {
 		printf("WRITE SUPPORT DISABLED VIA /dev/null AUTHFILE\n");
 	}
-	if(init_resources()==0) {
+	if(init_thread_resources()==0) {
 		brintf("Resource subsystem initted\n");
 	} else {
 		perror("Could not initialize resource system\n");
@@ -1109,10 +1109,7 @@ main(int argc, char **argv)
 	char *myargs[]= {0, 0, "-r", "-s", "-f", "-d", "-o", "nonempty", 0 };
 	#define ARGCOUNT 8
 	#endif */
-	unlink("/tmp/crestfs.sock");
-	if(fork()==0) {
-		run_worker("/tmp/crestfs.sock");
-	}
-	init_resources();
+	init_worker("/tmp/crestfs.sock",argv[2]);
+	//init_thread_resources();
 	return fuse_main(myargc, myargs, &crest_filesystem_operations, NULL);
 }

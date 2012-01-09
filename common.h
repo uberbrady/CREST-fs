@@ -4,17 +4,34 @@ extern char rootdir[1024];
 
 #ifndef SHUTUP
 
-void brintf(char *format,...) __attribute__ ((format (printf, 1,2)));
+//void brintf(char *format,...) __attribute__ ((format (printf, 1,2)));
+
+#if BRINTF_THREADLOCKED == 1
+#define brintf(args...) brintf_threadlocked(args)
+void brintf_threadlocked(char *format,...);
+#elif BRINTF_FILEOUT == 1
+#define brintf(args...) brintf_fileout(args)
+void brintf_fileout(char *format,...);
+#else
+#define brintf(args...) brintf_plain(args)
+void brintf_plain(char *format,...);
+#endif
+
+#define BFD_SET(fd,fdset) brintf("WORKER - Select() - Checking for %d ('" #fd "') for " #fdset "\n",fd);FD_SET(fd,fdset)
 
 #else
 
 #define brintf(args...) {}
+#define BFD_SET(fd,fdset) FD_SET(fd,fdset)
 
 #endif
 
 #define MANIFESTTYPE "x-vnd.bespin.corp/directory-manifest"
 
 void metafile_for_path(const char *path,char *buffer, int buflen, int isdir);
+
+char *metafile(const char *path,int *isdir); //non-reentrant version that's more convenient for eventloop stuff
+char *datafile(const char *path,int isdir); //non-reebtrant version that's more friendly for select() loop
 
 void datafile_for_path(const char *path,char *buffer, int buflen, int isdir);
 
@@ -76,6 +93,8 @@ extern int maxcacheage;
 extern char authfile[256];
 
 #define TOOMANYFILES 1000
+
+int should_have_body(char *verb,int status);
 
 void fetchheader(char *headers,char *name,char *results,int length);//http-related? 
 	

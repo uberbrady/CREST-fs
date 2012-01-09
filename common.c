@@ -130,12 +130,11 @@ char mingie[65535]="";
 
 #ifndef SHUTUP
 
-#if BRINTF_THREADLOCKED == 1
 #include <pthread.h>
 
 //THREADLOCKED BRINTF - why the FUCK was I doing this?!
 
-void brintf(char *format,...)
+void brintf_threadlocked(char *format,...)
 {
 	static pthread_mutex_t oneprint= PTHREAD_MUTEX_INITIALIZER;
 	va_list whatever;
@@ -145,9 +144,9 @@ void brintf(char *format,...)
 	fflush(NULL);
 	pthread_mutex_unlock(&oneprint);
 }
-#elif BRINTF_FILEOUT == 1
+
 //FILE-OUT BRINTF - good for when you're going to NOT be running in single-thread/debug mode
-void brintf(char *format,...)
+void brintf_fileout(char *format,...)
 {
 	va_list myargs;
 	va_start(myargs,format);
@@ -172,10 +171,8 @@ void brintf(char *format,...)
 	fflush(myfp);
 }
 
-#else
-
 //TRIVIAL BRINTF
-void brintf(char *format,...)
+void brintf_plain(char *format,...)
 {
 	va_list myargs;
 	va_start(myargs,format);
@@ -183,8 +180,6 @@ void brintf(char *format,...)
 	va_end(myargs);
 	fflush(stdout);
 }
-
-#endif
 
 void manglefinder(char *string,int lineno)
 {
@@ -223,9 +218,11 @@ pathparse(const char *path,char *hostname,char *pathonly,int hostlen,int pathlen
 	tmphostname=strsep(&tokenatedstring,"/");
 
 	strncpy(hostname,tmphostname,hostlen);
-	strcpy(pathonly,"/"); //pathonly always starts with slash...
-	if(tokenatedstring) {
-		strlcat(pathonly,tokenatedstring,pathlen);
+	if(pathonly && pathlen>0) {
+		strcpy(pathonly,"/"); //pathonly always starts with slash...
+		if(tokenatedstring) {
+			strlcat(pathonly,tokenatedstring,pathlen-1);
+		}
 	}
 	free(tmphostname);
 }
@@ -238,6 +235,22 @@ reanswer(char *string,regmatch_t *re,char *buffer,int length)
 	strlcpy(buffer,string+re->rm_so,length);
 	buffer[re->rm_eo - re->rm_so]='\0';
 	//brintf("Your answer is: %s\n",buffer);
+}
+
+int should_have_body(char *verb,int status)
+{
+	/*
+	For response messages, whether or not a message-body is included with a message is dependent on both the request method and the response status code (section 6.1.1). All responses to the HEAD request method MUST NOT include a message-body, even though the presence of entity- header fields might lead one to believe they do. All 1xx (informational), 204 (no content), and 304 (not modified) responses MUST NOT include a message-body. All other responses do include a message-body, although it MAY be of zero length.
+
+	*/
+	
+	if(strcmp(verb,"HEAD")==0) {
+		return 0;
+	}
+	if((status>=100 && status<200) || status==204 || status==304) {
+		return 0;
+	}
+	return 1;
 }
 
 void
@@ -365,6 +378,29 @@ metafile_for_path(const char *path,char *buffer, int buflen, int isdir) //isdir:
 	//brintf("Metafile_for_path: %s, returns buffer: %s\n",path,buffer);
 }
 
+
+char metabuffer[1024];
+//NON-REENTRANT metafile finder - for use in loopey things
+char *
+metafile(const char *path,int *isdir)
+{
+	if(*isdir==-1) {
+		//BLOCKING?
+		//Possibly Shitty?
+		struct stat statbuf;
+		if(stat(path+1,&statbuf)==0) {
+			if(S_ISDIR(statbuf.st_mode)) {
+				*isdir=1;
+			} else {
+				*isdir=0;
+			}
+		}
+	}
+	metafile_for_path(path,metabuffer,1024,*isdir);
+	brintf("Non-reentrant metafile: Metabuffer is: %s, but we're returning %s\n",metabuffer,metabuffer+1);
+	return metabuffer+1; //don't ever want that stupid prepending slash. Dumb.
+}
+
 void
 datafile_for_path(const char *path,char *buffer, int buflen, int isdir)
 {
@@ -375,6 +411,22 @@ datafile_for_path(const char *path,char *buffer, int buflen, int isdir)
 		}
 		strlcat(buffer,".crestfs_directory_cachenode",buflen);
 	}
+}
+
+char databuffer[1024];
+
+char *
+datafile(const char *path,int isdir)
+{
+	//do we have to handle 'isdir=-1'  meaning 'dunno'?!
+	if(isdir==-1) {
+		brintf("Not implemented - find datafile for unknown 'isdir' value of -1\n");
+		printf("Error - datafile - unknown isdir -1\n");
+		isdir=0; //FIXME. This is awful.
+		//exit(95);
+	}
+	datafile_for_path(path,databuffer,1024,isdir);
+	return databuffer+1;
 }
 
 #define DIRUPLOADS ".crestfs_pending_directories"

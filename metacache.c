@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if 1
+#if 0
 #define TESTMODE
 #endif
 
@@ -35,11 +35,15 @@ void brintf(char *format,...)
 }
 #endif
 
+#define MAXETAG 128
+
 typedef struct entry_t {
 	char *path;
 	response_t entry;
 	int timestamp;
 	struct entry_t *next;
+	char etag[MAXETAG];
+	//if we want to enable 304-style requests, we might need an 'etag' here too.
 } entry_t;
 
 entry_t *metaroot=0; //why the fuck am I doing this as a list, it could just be an array at this rate. Whatever.
@@ -47,7 +51,7 @@ entry_t *metaroot=0; //why the fuck am I doing this as a list, it could just be 
 //or whatever. I dunno
 
 //appends to end, or replaces the oldest entry
-void update_entry(char *path,int when,response_t what)
+void update_entry(char *path,int when,response_t what, char *etag)
 {
 	entry_t **where=&metaroot;
 	int entrynum=0;
@@ -83,21 +87,28 @@ void update_entry(char *path,int when,response_t what)
 	(*where)->path=strdup(path);
 	(*where)->entry=what;
 	(*where)->timestamp=when;
+	strncpy((*where)->etag,etag,MAXETAG);
 }
 
-int find_entry(char *path,response_t *what,int *timestamp)
+int find_entry(char *path,response_t *what,int *timestamp, char *etag,int etaglen)
 {
 	entry_t *where=metaroot;
 	while(where && strcmp(where->path,path)!=0) {
 		where=where->next;
 	}
-	if(where && what) {
+	if(!where) {
+		return 0;
+	}
+	if(what) {
 		*what=where->entry;
 	}
-	if(where && timestamp) {
+	if(timestamp) {
 		*timestamp=where->timestamp;
 	}
-	return where!=0; //either 0 if not found, or the actual entry otherwise
+	if(etag && etaglen>0) {
+		strncpy(etag,where->etag,etaglen);
+	}
+	return 1; //either 0 if not found, or the actual entry otherwise
 }
 
 void debug_entries(void)

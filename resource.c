@@ -29,11 +29,11 @@
 #include <sys/stat.h>
 #include <utime.h>
 
+#include "worker.h"
 #include "resource.h"
 #include "common.h"
 #include "http.h"
 
-#include "worker.h"
 //path will look like "/domainname.com/directoryname/file" - with leading slash
 
 /*
@@ -430,7 +430,7 @@ void finalclose(void *tls)
 	//close((int)tls);
 }
 
-int init_resources(void) {
+int init_thread_resources(void) {
 	int kc=pthread_key_create(&socketkey, finalclose);
 	resources_initted=(kc==0);
 	printf("pthread_key_create says: %d\n",kc);
@@ -441,7 +441,7 @@ int init_resources(void) {
 #include <sys/un.h>
 
 FILE *
-_get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode,int count)
+new_get_resource(const char *path,const char *preferredverb,char *purpose,char *cachefilemode,response_t *resp)
 {
 	//handle back-end unix domain socket connection via thread-local storage.
 	if(!resources_initted) { //is the TLS stuff initted?
@@ -463,7 +463,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
     printf("Trying to connect...\n");
 
     remote.sun_family = AF_UNIX;
-    strcpy(remote.sun_path, "/tmp/crestfs.sock");
+    strcpy(remote.sun_path,"/tmp/crestfs.sock");
     len = strlen(remote.sun_path) + sizeof(remote.sun_family)+1; //+1??!!?
     if (connect(s, (struct sockaddr *)&remote, len) == -1) {
         perror("thread-specific socket connect()");
@@ -471,6 +471,7 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
     }
     printf("Connected.\n");
 		spec=(void*)(long)s;
+		printf("The socket we're using is: %d\n",s);
 		pthread_setspecific(socketkey,spec);
 	}
 	//now we know we have a connection for this thread
@@ -492,26 +493,35 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
 		printf("Bizarre mode selected: '%s'\n",cachefilemode);
 		exit(15);
 	}
+	printf("The socket we want to use to *send* (and receive) is: %d\n",(int)(long)spec);
 	int bytessent=send((int)(long)spec,&req,sizeof(req),0);
 	if(bytessent!=sizeof(req)) {
 		brintf("Sent %d bytes, wanted %ld\n",bytessent,sizeof(req));
 	}
 	
 	//receive socket response...
-	response_t resp;
 	struct msghdr msg;
+	memset(&msg,0,sizeof(msg));
 	struct iovec msg_iov;
-	msg_iov.iov_base=&resp;
-	msg_iov.iov_len=sizeof(resp);
+	msg.msg_iov=&msg_iov;
+	msg_iov.iov_base=resp;
+	msg_iov.iov_len=sizeof(response_t);
 	msg.msg_iov=&msg_iov;
 	msg.msg_iovlen=1;
 	char ancillary_element_buffer[CMSG_SPACE(sizeof(int))];
   msg.msg_control = ancillary_element_buffer;
   msg.msg_controllen = CMSG_SPACE(sizeof(int));
-  
+ 
+	printf("We should be receiving on %d\n",(int)(long)spec);
 	int bytesrecv=recvmsg((int)(long)spec,&msg,/* MSG_CMSG_CLOEXEC*/0); //I don't know what that would mean
-	if(bytesrecv==sizeof(resp)) {
-		brintf("GET_RESOURCE RESPONSE FOR %s, Filetype: %d, Moddate: %d, Filesize: %ld\n",path,resp.filetype,resp.moddate,resp.size);
+	//int bytesrecv=recv((int)(long)spec,poobuf,5,0);
+	//sleep(5);
+	brintf("I woke up after sleeping 5, Having read %d bytes\n",bytesrecv);
+	if(bytesrecv==-1) {
+		perror("GET_RESOURCE: Response - bytesrecv'ed");
+	}
+	if(bytesrecv==sizeof(response_t)) {
+		brintf("GET_RESOURCE RESPONSE FOR %s, Filetype: %d, Moddate: %d, Filesize: %ld\n",path,resp->filetype,resp->moddate,resp->size);
 		struct cmsghdr *control_message = NULL;
 		int sent_fd=-1;
 		
@@ -522,26 +532,41 @@ _get_resource(const char *path,char *headers,int headerlength, int *isdirectory,
    		if( (control_message->cmsg_level == SOL_SOCKET) &&
        	(control_message->cmsg_type == SCM_RIGHTS) )
    		{
+				brintf("GET_RESOURCE - found control message with alleged fd in it\n");
     		sent_fd = *((int *) CMSG_DATA(control_message));
    		}
   	}
 		if(sent_fd!=-1) {
-			brintf("GET_RESOURCE - File descriptor recieved, value is: %d, closing...",sent_fd);
-			if(close(sent_fd)==0) {
+			brintf("GET_RESOURCE - File descriptor recieved, value is: %d, \n",sent_fd);/*
+			char crazybuf[65535];
+			memset(crazybuf,0,sizeof(crazybuf));
+			int crazybytes=read(sent_fd,crazybuf,sizeof(crazybuf));
+			brintf("GET_RESOURCE - CRAZYBUF!!!!! Read %d bytes: '%s'\n",crazybytes,crazybuf); */
+/*			if(close(sent_fd)==0) {
 				brintf("CLOSE OK!\n");
 			} else {
 				brintf("Close FAIL :%s\n",strerror(errno));
+			}*/
+			FILE *p=fdopen(sent_fd,cachefilemode);
+			if(!p) {
+				brintf("GET_RESOURCE - returned file descriptor %d parsed into a bad file %p because of %s\n",sent_fd,p,strerror(errno));
 			}
-		} else {
+			fpurge(p);
+			return p;
+  	} else {
 			brintf("File descriptor looks bad, value is: %d\n",sent_fd);
+			return BADFILE;
 		}
 	} else {
-		brintf("GET_RESOURCE RESPONSE FAIL %s - Received %d bytes, wanted %ld\n",path,bytesrecv,sizeof(resp));
+		brintf("GET_RESOURCE RESPONSE FAIL %s - Received %d bytes, wanted %ld\n",path,bytesrecv,sizeof(response_t));
 	}
+	//End of all the newfangled socket stuff
+	return BADFILE;
+}
 
-
-
-
+FILE *
+_get_resource(const char *path,char *headers,int headerlength, int *isdirectory,const char *preferredverb,char *purpose,char *cachefilemode,int count)
+{
 	//legacy method, blocking - 
 	//first, check cache. How's that looking?
 	struct stat cachestat;

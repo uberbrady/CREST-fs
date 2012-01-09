@@ -5,11 +5,13 @@
 #include <unistd.h>
 
 #include "common.h"
+#include "worker.h"
 
 int maxcacheage=0;
 
 char authfile[256]="/dev/null";
 
+#include <stdio.h>
 #include "resource.h"
 
 extern int
