@@ -28,12 +28,17 @@ typedef enum {
 	Done
 }	http_state_t;
 
+#define METAFILELEN 1024
+
 struct opaque_http {
 	int fd;
 	int reqbodyfd;
 	http_state_t httpstate;
+	char tmpmetafile[METAFILELEN];
 	char verb[VERBLEN];
 	char headers[HEADERLEN]; //null-terminated request header string *WITH* final \r\n\r\n sequence. re-used for response headers.
+	int metafd; //needs to be separate from reqbodyfd because we will try to open it at start.
+	int metaprogress;
 	char buffer[BUFLEN]; //containes either a chunk OR actual body pieces. Also used as buffer when SENDing a body
 	char *progress; //How far have we gotten into the headers for send, the buffer for send, or the buffer for receive?
 	char *endbuffer; //for body buffers, where does the buffer end?
@@ -41,6 +46,9 @@ struct opaque_http {
 	int length; //content-length for 'straight' content, chunk-size for 'chunked'?
 	int bodyprogress; //how far into the 'chunk' are we now, or how far into the 'body' are we now?
 }; // http_t (typedef'ed in .h)
+
+#define MAX_HTTP 16
+http_t httparray[MAX_HTTP];
 
 #define MAX_KEEP 128
 #define HOSTLEN 128
@@ -115,9 +123,6 @@ void handle_keepalives(fd_set *readers)
 	}
 }
 
-#define MAX_HTTP 16
-http_t httparray[MAX_HTTP];
-
 void init_http(void)
 {
 	memset(&httparray,0,sizeof(httparray));
@@ -143,6 +148,54 @@ int get_block_http(http_t *h,void **ptr)
 	return h->endbuffer - h->progress; //number of bytes available in the buffer
 }
 
+//if the metadata is finished writing, close it and return 1
+//otherwise, return 0
+int close_metadata_if_finished(http_t *h)
+{
+	if(h->metafd==-1) {
+		return 1; //yes, you're finished. Your metafd is busted.
+	}
+	brintf("We are going to try to close metadata if finished metafd: %d\n",h->metafd);
+	if((unsigned)h->metaprogress < strlen(h->headers)+1) {
+		return 0;
+	} else {
+		close(h->metafd);
+		//rename? 'link'? No. Not my job. I do HTTP and give you tmpfiles. That's it.
+		brintf("async_http - finish - tmpfilename: %s\n",h->tmpmetafile);
+		h->metafd=-1;
+		return 1;
+	}
+}
+
+void check_metadata_if_needed(http_t *h,fd_set *writers,int *maxfd)
+{
+	if(h && h->httpstate>=ReceivingBody && !close_metadata_if_finished(h)) {
+		BFD_SET(h->metafd,writers);
+		if(h->metafd>*maxfd) {
+			*maxfd=h->metafd;
+		}
+	}
+}
+
+void write_metadata_if_needed(http_t *h,fd_set *writers)
+{
+	if(h->metafd==-1) {
+		return;
+	}
+	if(FD_ISSET(h->metafd,writers) && !close_metadata_if_finished(h)) {
+		brintf("OKay, we're going to try to write metadata if needed\n");
+		int bytestowrite=strlen(h->headers)-h->metaprogress+1;
+		int writtenbytes=write(h->metafd,h->headers+h->metaprogress,bytestowrite);
+		h->metaprogress+=writtenbytes;
+		if(bytestowrite!=writtenbytes) {
+			brintf("SHORT WRITE DETECTED TO METADATA! What do we do? I don't know.\n");
+			//I *guess* I can track a *Separate* pointer for how far along in writing the metadata we are.
+			//and make sure not to leave 'ReceivingHeaders' mode until it's caught up? 
+			//Fine. I'll do that. Yech.
+		}
+	}
+}
+
 int more_data_http(http_t *h,int writtenbytes)
 {
 	//okay! The user of our stuff here has managed to use (writtenbytes) out of our connection. This is good!
@@ -156,7 +209,7 @@ int more_data_http(http_t *h,int writtenbytes)
 	}
 	if(!h->chunked) {
 		h->bodyprogress+=writtenbytes;
-		if(h->bodyprogress>=h->length) {
+		if(h->bodyprogress>=h->length && close_metadata_if_finished(h)) { //make sure we don't cut off writes to metadata if it's not done yet
 			return 0; //no more_data
 		} else {
 			return 1;
@@ -173,7 +226,10 @@ void check_http(fd_set *readset,fd_set *writeset,int *maxfd)
 	for(i=0;i<MAX_HTTP;i++) {
 		switch(httparray[i].httpstate) {
 			case Empty:
+			break;
+			
 			case Done:
+			check_metadata_if_needed(&httparray[i],writeset,maxfd);
 			break;
 			
 			case Connecting:
@@ -205,6 +261,14 @@ void check_http(fd_set *readset,fd_set *writeset,int *maxfd)
 			
 			case ReceivingHeaders:
 			case ReceivingBody:
+			//FALLTHROUGH ON PURPOSE!
+			check_metadata_if_needed(&httparray[i],writeset,maxfd); //this bit is funky, we *might* receive some headers,but
+																																//not the \r\n\r\n break. If so, select() may return that 
+																																//we're ready to write to the metadata file, but we might
+																																//not ahve the data yet. If so, nothing happens. Don't like
+																																//the spurious wakeup though, but I'll live. But on the off
+																																//(actually quite likely) chance that we *do* hit the break,
+																																//we can immediately start the write. And that's nice.
 			BFD_SET(httparray[i].fd,readset);
 			if(httparray[i].fd>*maxfd) {
 				*maxfd=httparray[i].fd;
@@ -260,8 +324,12 @@ void handle_http(fd_set *readset,fd_set *writeset)
 		
 		switch(httparray[j].httpstate) {
 			case Empty:
+			break;
+			
 			case Done:
 			//nothing interesting to do here. Move along.
+			//other than making sure the metadata is all written
+			write_metadata_if_needed(&httparray[j],writeset);
 			break;
 			
 			case Resolving:
@@ -345,6 +413,7 @@ void handle_http(fd_set *readset,fd_set *writeset)
 			if(FD_ISSET(httparray[j].fd,readset)) {
 				int headerssofar=strlen(httparray[j].headers);
 				bytecounter=recv(httparray[j].fd,httparray[j].headers+headerssofar, HEADERLEN-headerssofar-1,0);
+				
 				if(headerssofar>=HEADERLEN) {
 					brintf("TOO BOCOUP! Header is too long\n");
 					exit(53);
@@ -356,6 +425,7 @@ void handle_http(fd_set *readset,fd_set *writeset)
 					memcpy(httparray[j].buffer,indicator+4,bodybytes);
 					*(indicator+4)='\0';//clip off the indicator
 					brintf("RECEIVED HEADERS!!! They are: %s\n",httparray[j].headers);
+					write_metadata_if_needed(&httparray[j],writeset); //*THIS* is the first time we can call this.
 					brintf("Remnant is: %d bytes:  %s\n",bodybytes,httparray[j].buffer);
 					//parse_headers_somehow(); //important if nothing else to determine if this is chunked or not. Also will want to fill a metacache elem
 					char transfer_encoding[128];
@@ -373,7 +443,7 @@ void handle_http(fd_set *readset,fd_set *writeset)
 					httparray[j].bodyprogress=0; //yes, zero. the bodybits will get handled in ReceiveBody
 					httparray[j].endbuffer=httparray[j].buffer; //this will be adjusted later by the call to ReceiveBody
 					httparray[j].progress=httparray[j].buffer;
-					if(should_have_body(httparray[j].verb,fetchstatus(httparray[j].headers))) {
+					if(has_body_http(&httparray[j])) {
 						httparray[j].httpstate=ReceivingBody;
 						ReceiveBody(&httparray[j],bodybytes);
 					} else {
@@ -384,6 +454,7 @@ void handle_http(fd_set *readset,fd_set *writeset)
 			break;
 			
 			case ReceivingBody:
+			write_metadata_if_needed(&httparray[j],writeset);
 			bytecounter=recv(httparray[j].fd,httparray[j].endbuffer,BUFLEN-(httparray[j].endbuffer-httparray[j].buffer),0);
 			brintf("RECV called for regular REceivingBody Thing - %d bytes retrieved\n",bytecounter);
 			ReceiveBody(&httparray[j],bytecounter);
@@ -527,6 +598,11 @@ http_t *new_http(char *resource,char *verb,char *headers,int bodyfd,int bodylen,
 			char hostname[80];
 			char urlpath[1024];
 			pathparse(resource,hostname,urlpath,80,1024);
+			int isdir=-1;
+			cresttemp(ht->tmpmetafile,METAFILELEN);
+			ht->metafd=open(ht->tmpmetafile,O_WRONLY|O_NONBLOCK|O_TRUNC|O_CREAT,0750);
+			brintf("Trying to open metafile %s , got file descriptor %d - file or directory?: %d\n",ht->tmpmetafile,ht->metafd,isdir);
+			ht->metaprogress=0;
 			for(j=0;j<MAX_KEEP;j++) {
 				if(strcmp(keepalives[j].hostname,hostname)==0) {
 					ht->httpstate=SendingHeaders;
@@ -567,4 +643,23 @@ void finish_http(http_t *h,char *hostname,char *headers)
 	}
 	strncpy(headers,h->headers,HEADERLEN);
 	h->httpstate=Empty;
+}
+
+char *metatmp_http(http_t *h)
+{
+	if(h && h->httpstate > ReceivingHeaders) {
+		return h->tmpmetafile;
+	} else {
+		return 0;
+	}
+}
+
+int has_body_http(http_t *h)
+{
+	if(h) {
+		return should_have_body(h->verb,fetchstatus(h->headers));
+	} else {
+		brintf("Asking unanswerable question - does a NULL http_t have a body? How the hell do I know?\n");
+		exit(93); 
+	}
 }

@@ -30,8 +30,14 @@ void brintf_plain(char *format,...);
 
 void metafile_for_path(const char *path,char *buffer, int buflen, int isdir);
 
+//async support functions (depends on rest of common.h for the most part)
 char *metafile(const char *path,int *isdir); //non-reentrant version that's more convenient for eventloop stuff
 char *datafile(const char *path,int isdir); //non-reebtrant version that's more friendly for select() loop
+void cresttemp(char *filename,int maxlength); //non-reentrant tempfile name generator
+void init_tempdir(); //init routine that ensures the tempdir exists for transfer files
+void rename_mkdirs(char *prevname,char *newname);
+//end new async support functions
+
 
 void datafile_for_path(const char *path,char *buffer, int buflen, int isdir);
 

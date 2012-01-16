@@ -28,3 +28,7 @@ int receiving_body(http_t *);
 
 int more_data_http(http_t *,int writtenbytes); //pass in the number of bytes you actually used out of the HTTP connection.
 //returns 1 if there is more data to be had, or 0 if you've received it all
+
+int has_body_http(http_t *); //returns 1 if you're supposed to have a body
+
+char *metatmp_http(http_t *); //returns the tempfile that was created via http

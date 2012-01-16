@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include <sys/time.h>
+
 typedef enum {
 	Idle=0,
 //	Resolving, //unused? DNS resolution happens at the HTTP socket layer/keepalive layer, not here.
@@ -20,6 +22,7 @@ typedef enum {
 } transfer_status_t;
 
 #define MAXREQUEST 16384
+#define MAXFILENAME 1024
 
 struct opaque_transfer {
 	//what resource are we looking for? I don't think we have to know?
@@ -27,12 +30,15 @@ struct opaque_transfer {
 	http_t *websock;
 	// int requestbuf[MAXREQUEST];
 	// int headersent;
+	char tmpfilename[MAXFILENAME];
 	int filesock;
 	//some sort of buffer - in case the web outpaces our disk, or vice-versa?
 	int recursioncount; //to keep track of redirect loops, etc? start at 0?
 	char headers[HEADERLEN];
 	transfer_status_t status;
 	char hostname[128];
+	char metafilename[MAXFILENAME];
+	char datafilename[MAXFILENAME];
 };
 
 //we do *NOT* speak HTTP.
@@ -71,12 +77,13 @@ transfer_t *new_transfer(char *resource,char *verb,char *headers ,int bodyfd,int
 			transfers[i].websock=new_http(resource,verb,headers,bodyfd,bodylen,prevetag,purpose); // or something? will either put in a new async lookup, or a full-functioning socket
 			
 			//open FD for ...file? tmpfile? Something?
-			char fetchfilename[1024];
-			strncpy(fetchfilename,datafile(resource,-1),1024); //use datafile()?
-			strcat(fetchfilename,".downloadXXXXXX");
-			transfers[i].filesock=open(mktemp(fetchfilename),O_RDWR|O_CREAT|O_EXCL|O_NONBLOCK);
+			cresttemp(transfers[i].tmpfilename,MAXFILENAME);
+			transfers[i].filesock=open(transfers[i].tmpfilename,O_RDWR|O_CREAT|O_EXCL|O_NONBLOCK);
 			//do we have to check if we somehow -1'ed?
 			transfers[i].status=Sending;
+			int is_directory=-1;
+			strncpy(transfers[i].metafilename,metafile(resource,&is_directory),MAXFILENAME);
+			strncpy(transfers[i].datafilename,datafile(resource,is_directory),MAXFILENAME);
 			return &transfers[i];
 		}
 	}
@@ -114,7 +121,7 @@ handle_transfers(fd_set *readset,fd_set *writeset)
 	for(i=0;i<MAXTRANSFER;i++) {
 		int blocklen=0;
 		void *httpdata=0;
-		if(transfers[i].websock && receiving_body(transfers[i].websock) && 0!=(blocklen=get_block_http(transfers[i].websock,&httpdata))) { //got data!
+		if(transfers[i].websock && receiving_body(transfers[i].websock) && (!has_body_http(transfers[i].websock) || 0!=(blocklen=get_block_http(transfers[i].websock,&httpdata)))) { //got data!
 			brintf("Data is available on something where we're receiving the body...\n");
 			if(FD_ISSET(transfers[i].filesock,writeset)) {
 				brintf("And furthermore, we're ready to write to our file! Blocklen: %d, httpdata ptr: %p\n",blocklen,httpdata);
@@ -123,29 +130,55 @@ handle_transfers(fd_set *readset,fd_set *writeset)
 				if(!more_data_http(transfers[i].websock,writtenbytes)) {
 					//We're DONE!!!! UHm. Now what?
 					brintf("WE ARE DONE TRANSFERRING!!!!!! YAY!\n");
+					//FIXME - if this works now, zero byte files will likely FAIL.
+					//be prepared to unlink if we weren't supposed to have a body in the first place
+					//check statuses for things like - redirect due to directory? 404? Etc? Do we want to be dropping 404 files everywhere?
+					//including nonexistent paths?
+					//retrying http cconnetions would happen *HERE*
+					//FIXME FIXME FIXME
+					//
+					// ADD A WHOLE BUNCHA CRAP HERE
+					//
+					// THIS BELONGS HERE
+					int is_directory=-1;
+					if(fetchstatus(transfers[i].headers)==304) {
+						//somehow refer back to what's on disk?
+						//TOUCH METAFILE!
+						utimes(metafile(transfers[i].metafilename,&is_directory),0); //BLOCKING 
+					} else {
+						rename_mkdirs(metatmp_http(transfers[i].websock),transfers[i].metafilename);
+					}
+					if(!has_body_http(transfers[i].websock)) {
+						close(transfers[i].filesock);
+						unlink(transfers[i].tmpfilename);
+						transfers[i].filesock=-1; //no body 
+					} else {
+						rename_mkdirs(transfers[i].tmpfilename,transfers[i].datafilename);
+						int seekout=lseek(transfers[i].filesock,0,SEEK_SET); //rewind file descriptor
+						if(seekout==-1) {
+							brintf("Handle_transfers seek fail?: %s(%d)\n",strerror(errno),errno);
+						}
+						int oldflags = fcntl(transfers[i].filesock, F_GETFL, 0); //get previous set of flags so we can disable nonblocking mode on this file
+						if(oldflags==-1) {
+							brintf("WORKER - Transfers - handle_transfers - ERROR - oldflags on file descriptor is -1?!\n");
+						}
+						oldflags &= ~O_NONBLOCK; //just turn off NONBLOCK
+						if(fcntl(transfers[i].filesock,F_SETFL,oldflags)==-1) {
+							brintf("WORKER - Transfers - handle_transfers - ERROR - cannot unset O_NONBLOCK on FD\n");
+						}
+					}
+					//we can't do this till we're done grabbing things from the http status - has_body_http is one good example
+					//to see if we yank the body or not.
 					finish_http(transfers[i].websock,transfers[i].hostname,transfers[i].headers); //should deallocate the http
 					transfers[i].websock=0;
-					//FIXME - if this works now, zero byte files will likely FAIL.
-					int seekout=lseek(transfers[i].filesock,0,SEEK_SET); //rewind file descriptor
-					if(seekout==-1) {
-						brintf("Handle_transfers seek fail?: %s(%d)\n",strerror(errno),errno);
-					}
-					int oldflags = fcntl(transfers[i].filesock, F_GETFL, 0); //get previous set of flags so we can disable nonblocking mode on this file
-					if(oldflags==-1) {
-						brintf("WORKER - Transfers - handle_transfers - ERROR - oldflags on file descriptor is -1?!\n");
-					}
-					oldflags &= ~O_NONBLOCK; //just turn off NONBLOCK
-					if(fcntl(transfers[i].filesock,F_SETFL,oldflags)==-1) {
-						brintf("WORKER - Transfers - handle_transfers - ERROR - cannot unset O_NONBLOCK on FD\n");
-					}
 					
 					/* BEGIN FREAKY DEAKY TEST */
-					char freakybuf[65535];
+/*					char freakybuf[65535];
 					memset(freakybuf,0,sizeof(freakybuf));
 					int freakybytes=read(transfers[i].filesock,freakybuf,65535);
 					brintf("Read %d freakybytes and got: '%s'\n",freakybytes,freakybuf);
 					seekout=lseek(transfers[i].filesock,0,SEEK_SET);
-					brintf("Final freaky seek says: %d\n",seekout);
+					brintf("Final freaky seek says: %d\n",seekout); */
 					/* END FREAKY DEAKY TEST */
 					transfers[i].status=Finished;
 				}

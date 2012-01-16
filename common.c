@@ -394,6 +394,9 @@ metafile(const char *path,int *isdir)
 			} else {
 				*isdir=0;
 			}
+		} else {
+			//no stat() entry, default it to 'file'
+			*isdir=0;
 		}
 	}
 	metafile_for_path(path,metabuffer,1024,*isdir);
@@ -427,6 +430,40 @@ datafile(const char *path,int isdir)
 	}
 	datafile_for_path(path,databuffer,1024,isdir);
 	return databuffer+1;
+}
+
+#define CRTEMP ".crestfs_tmp/"
+
+#include <sys/stat.h>
+
+void
+init_tempdir(void)
+{
+	struct stat tmpdir;
+	if(stat(CRTEMP,&tmpdir)==0 && S_ISDIR(tmpdir.st_mode)) {
+		brintf("Temp dir already created");
+	} else {
+		mkdir(CRTEMP,0750);
+	}
+}
+
+void
+cresttemp(char *filename,int maxlen)
+{
+	strncpy(filename,CRTEMP,maxlen);
+	strncat(filename,".downloadXXXXXX",maxlen);
+	mktemp(filename);
+}
+
+void
+rename_mkdirs(char *prevname,char *newname)
+{
+	if(rename(prevname,newname)!=0) {
+		redirmake(newname);
+		if(rename(prevname,newname)!=0) {
+			brintf("ERROR - could not recursively make directory for file: %s\n",newname);
+		}
+	}
 }
 
 #define DIRUPLOADS ".crestfs_pending_directories"

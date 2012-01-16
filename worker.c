@@ -20,6 +20,11 @@
 #include "transfers.h"
 
 #include <time.h>
+#include <sys/stat.h>
+
+#define HEADERLEN 16384
+//FIXME - we are *REDEFINING* this - the CANONICAL one is in async_http.h
+//HOW DO WE FIX THIS?!!?
 
 typedef struct {
 	char *path; //I think this is superfluous - we *know* which search you are, based on which request you are! (well, unless this changes
@@ -32,6 +37,7 @@ typedef struct {
 	//at some point some kind of directory thing? I don't know really
 	int metafd; //is this the METADATA FD? or the DATA-Data-FD?
 	int datafd;
+	char headerbuf[HEADERLEN];
 	transfer_t *transfer;
 } search_t;
 
@@ -104,8 +110,12 @@ finish_search(search_t *which)
 			connections[i].resp=which->entry;
 			connections[i].phase=SendingResponse;
 			connections[i].search=0; //MUST set this to zero so a new re-use of this will start a new search
-			connections[i].datafilefd=which->datafd; //WARNING FIXME - does this mean multiple requests to read file will ALL refer to same FD?!
-			//IF SO THAT COULD BE VERY VERY VERY VERY VERY BAD!!! FIXME BROKEN FIX FIXME DUP DUP2
+			if(matches==0) {
+				connections[i].datafilefd=which->datafd; //WARNING FIXME - does this mean multiple requests to read file will ALL refer to same FD?!
+				//IF SO THAT COULD BE VERY VERY VERY VERY VERY BAD!!! FIXME BROKEN FIX FIXME DUP DUP2
+			} else {
+				connections[i].datafilefd=open(datafile(which->path,which->directoryhint),O_RDONLY|O_NONBLOCK);
+			}
 			matches++;
 		}
 	}
@@ -125,17 +135,27 @@ new_search(connection_t *conn)
 	int timestamp=0;
 	response_t resp;
 	char etag[128]="";
-	if(find_entry(conn->req.resource,&resp,&timestamp,etag,128)) {
-		if(time(0)-timestamp<=maxcacheage) {
-			brintf("WORKER: Searches - FOUND IT IN CACHE!!!! GOING straight to Sending Response\n");
-			//We *found* a cache entry, and it is FRESH (trivially, not by clever etags optimizations or other such)
-			conn->resp=resp;
-			conn->phase=SendingResponse;
-			return; //without allocating a search or anything
+	if(find_entry(conn->req.resource,&resp,&timestamp,etag,128) && time(0)-timestamp<=maxcacheage) {
+		brintf("WORKER: Searches: found a cache entry that is fresh\n");
+		brintf("WORKER: Searches - FOUND IT IN CACHE!!!! GOING straight to Sending Response\n");
+		//We *found* a cache entry, and it is FRESH (trivially, not by clever etags optimizations or other such)
+		conn->datafilefd=open(datafile(conn->req.resource, resp.filetype==Directory || resp.filetype==Manifest ? 1: 0),O_RDONLY); //BLOCKING! FIXME!
+		if(conn->datafilefd==-1) {
+			brintf("This is total fail. Tried to open datafile - botched it. resource: %s, datafile: %s, errno: %d, errmsg: %s\n",conn->req.resource,datafile(conn->req.resource, resp.filetype==Directory || resp.filetype==Manifest ? 1: 0),errno,strerror(errno));
 		}
+		brintf("And the datafilefd is: %d\n",conn->datafilefd);
+		conn->resp=resp;
+		conn->phase=SendingResponse;
+		return; //without allocating a search or anything
+		// } else {
+		// 	brintf("WORKER: Searches - Cache entry is stale - NOT IMPLEMENTED!!!!!\n");
+		// 	//shoudl go straight to HTTP? What do I do here?!
+		// 	//below, i need to short-circuit the going-to-disk thing - we know this isn't going to be any fresher on disk.
+		// 	
+		// }
 		//if the entry is STALE, we may use the etag to try and get a 304 response, barring that, it's a regular search
 	} else {
-		brintf("WORKER: Searches - Could not find in cache, trying to grab from disk... for resource %s\n",connections[i].req.resource);
+		brintf("WORKER: Searches - Could not find in cache (or stale), trying to grab from disk... for resource %s\n",connections[i].req.resource);
 		int empty=-1;
 		for(i=0;i<MAXSEARCHES;i++) {
 		//	brintf("WORKER: Searches: Checking Search #%d which alleges to have path: %p\n",i,searches[i].path);
@@ -153,22 +173,32 @@ new_search(connection_t *conn)
 			}
 		}
 		if(empty!=-1) {
+			searches[empty].headerbuf[0]='\0'; //clear out header buffer
 			brintf("WORKER: Searches: It's a brand new search entry: %d\n",empty);
 			searches[empty].path=strdup(conn->req.resource);
 			memset(&searches[empty].entry,0,sizeof(response_t));
+			conn->search=&searches[empty];
 			//IF timestamp!=0, go straight to transferring? (trivial refresh method)
 			//brintf("WORKER: Searches - We've memset to zero\n");
 			//should we open() here, and mark for nonblocking? Yes, I guess it's inherent in the Search process.
+			//short-circuit - if we have an etag, we are doing a refresh - go straight to making a new Transfer and skip
+			//the open-attempts
+			if(etag[0]!='\0') {
+				conn->phase=Transferring;
+				conn->search->metafd=-1; //we didn't read a file.
+				conn->search->transfer=new_transfer(conn->req.resource,"GET",0,-1,0,etag,"instant_new_transfer");
+				return;
+			}
 			char cwd[1024];
 			getcwd(cwd,1024);
 			brintf("WORKER: Searches. I am a little curious as to our 'current working directory': %s\n",cwd);
+			
 			int file_or_directory=-1;
 			searches[empty].metafd=open(metafile(conn->req.resource,&file_or_directory),O_NONBLOCK|O_RDONLY);
 			if(searches[empty].metafd==-1) {
 				brintf("WORKER: Searches. Couldn't open file as plain file: %s\n",strerror(errno));
 				file_or_directory=1;
 				searches[empty].metafd=open(metafile(conn->req.resource,&file_or_directory),O_NONBLOCK|O_RDONLY);
-				conn->search=&searches[empty];
 				if(searches[empty].metafd==-1) {
 					brintf("WORKER: Searches - could not open as file OR Directory!!! %s\n",strerror(errno));
 					//searches[empty].entry.filetype=NoFile;
@@ -179,6 +209,7 @@ new_search(connection_t *conn)
 				} else {
 					brintf("WORKER: Searches - we've managed to open metafile as a directory instead.\n");
 					searches[empty].directoryhint=1;
+					brintf("THIS DOESNT LOOK IMPLEMENTED TO ME!!!!!\n");
 				}
 			} else {
 				brintf("WORKER: Searches - we've opened a file descriptor: %d for resource %s\n",searches[empty].metafd,conn->req.resource);
@@ -187,7 +218,6 @@ new_search(connection_t *conn)
 				} else {
 					searches[empty].directoryhint=0;
 				}
-				conn->search=&searches[empty];
 				conn->phase=Searching;
 				return;
 			}
@@ -363,10 +393,6 @@ parse_headers_into_response(char *headers,response_t *resp,int *timestamp,int fd
 	}
 }
 
-#define HEADERLEN 16384
-//FIXME - we are *REDEFINING* this - the CANONICAL one is in async_http.h
-//HOW DO WE FIX THIS?!!?
-
 void
 handle_searches(fd_set *readfds)
 {
@@ -376,10 +402,12 @@ handle_searches(fd_set *readfds)
 			continue;
 		}
 		//now handle reading the results of any searches into our buffer, and parsing out the bits we care about.
-		char buffer[HEADERLEN];
+		char *buffer=0;
 		if(searches[i].metafd!=-1 && FD_ISSET(searches[i].metafd,readfds)) { //don't try FD_ISSET for searches that aren't running
+			buffer=searches[i].headerbuf;
+			buffer+=strlen(buffer);
 			brintf("WORKER: Searches - ready to read from file descriptor: %d for search %d\n",searches[i].metafd,i);
-			int bytesread=read(searches[i].metafd,&buffer,sizeof(buffer));
+			int bytesread=read(searches[i].metafd,buffer,HEADERLEN-strlen(searches[i].headerbuf));
 			if(bytesread==0 || bytesread==-1) {
 				brintf("WORKER: Searches - read resulted in zero or -1 (%d) bytes errno: %d, error: %s\n",bytesread,errno,strerror(errno));
 				if(errno==2) { //no such file or directory. TO THE INTARNET!
@@ -391,33 +419,56 @@ handle_searches(fd_set *readfds)
 				//close(searches[i].fd);
 				continue; //go on to the next thing, there's nothing else for you here.
 			} else {
-				if(bytesread==sizeof(buffer)) {
-					brintf("Worker: Searches - WARNING - FULL BUFFER TRUNCATING LAST CHARACTER '%c'!!!\n",buffer[sizeof(buffer)-1]);
-					buffer[sizeof(buffer)-1]='\0';
+				if(bytesread==HEADERLEN) {
+					brintf("Worker: Searches - WARNING - FULL BUFFER TRUNCATING LAST CHARACTER '%c'!!!\n",buffer[HEADERLEN-1]);
+					buffer[HEADERLEN-1]='\0';
 				} else {
 					brintf("Worker: Searches - we managed to read %d bytes\n",bytesread);
 					buffer[bytesread]='\0';
 				}
-				if(strstr(buffer,"\r\n\r\n")==0) {
+				if(strstr(searches[i].headerbuf,"\r\n\r\n")==0) {
 					brintf("Header is NOT complete yet from read in handle_searches - don't go returning yet.\n");
 					continue;
 				}
-				/* ((connections[i].resp.filetype==Directory || connections[i].resp.filetype==Manifest) ? 1: 0) */
-				//So - how do we figure out if we open this datafile as a *file* or as a *directory*?!
-				//DUMBASS - it's already set in the search. Just use the @#*$!#*$* hint.
-				searches[i].datafd=open(datafile(searches[i].path,searches[i].directoryhint),O_RDONLY); //BLOCKING!
+				struct stat stalecheck;
+				int file_or_directory=-1;
+				if(stat(metafile(searches[i].path,&file_or_directory),&stalecheck)==0 && time(0)-stalecheck.st_mtime<=maxcacheage) { //BLOCKING
+					/* ((connections[i].resp.filetype==Directory || connections[i].resp.filetype==Manifest) ? 1: 0) */
+					//So - how do we figure out if we open this datafile as a *file* or as a *directory*?!
+					//DUMBASS - it's already set in the search. Just use the @#*$!#*$* hint.
+					searches[i].datafd=open(datafile(searches[i].path,searches[i].directoryhint),O_RDONLY); //BLOCKING!
+				} else {
+					char etag[128]="";
+					fetchheader(buffer,"etag",etag,128);
+					searches[i].transfer=new_transfer(searches[i].path,"GET",0,-1,0,etag,"handle_searches stale_uncached_cachefile");
+					close(searches[i].metafd);
+					searches[i].metafd=-1;
+				}
 			}
 		} else {
-			if(!searches[i].transfer || !transfer_completed(searches[i].transfer,buffer,&searches[i].datafd)) {
+			char xferbuf[HEADERLEN]="";
+			if(!searches[i].transfer || !transfer_completed(searches[i].transfer,xferbuf,&searches[i].datafd)) {
 				//Bad form, but *do* note that 'transfer_completed' has SIDE EFFECTS - of filling out the buffer, 
 				//and filling out the datafd
 				continue; //either we have no transfer or transfer is not complete
+			}
+			if(fetchstatus(xferbuf)==304) {
+				//use PREVIOUS copy of headerbuf that you fetched from disk!!!
+				//though if you came from the metacache, it's curtains for you
+				brintf("304 DETECTED!\n");
+				if(searches[i].headerbuf[0]=='\0') {
+					brintf("WARNING - ERROR - NO HEADERS FOUND IN PRE-CACHE-EY THING! DUNNO HOW TO HANDLE.");
+				}
+				searches[i].datafd=open(datafile(searches[i].path,searches[i].directoryhint),O_RDONLY); //BLOCKING!
+			} else {
+				brintf("Normal non-304, copying results into headerbuf. Status: %d, results: %s\n",fetchstatus(xferbuf),xferbuf);
+				strncpy(searches[i].headerbuf,xferbuf,HEADERLEN);
 			}
 			brintf("Transfer has been completed, and has given us File Descriptor #%d\n",searches[i].datafd);
 		}
 		int timestamp;
 		char *etag=0;
-		parse_headers_into_response(buffer,&searches[i].entry,&timestamp,searches[i].datafd,&etag);
+		parse_headers_into_response(searches[i].headerbuf,&searches[i].entry,&timestamp,searches[i].datafd,&etag);
 		debug_response(&searches[i].entry,"WORKER: Searches - handle_searches");
 		update_entry(searches[i].path,timestamp,searches[i].entry,etag);
 		finish_search(&searches[i]);
@@ -671,6 +722,9 @@ init_worker(char *socketname,char *cacheroot)
 			brintf("WORKER: Could not change to Cache Directory! %s\n",strerror(errno));
 			exit(10);
 		}
+		brintf("initializing temporary directories...\n");
+		init_tempdir();
+		
 		brintf("ready to enter forever loop in WORKER\n");
 		fd_set readers,writers;
 		while(1) {
