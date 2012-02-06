@@ -8,13 +8,13 @@ extern char rootdir[1024];
 
 #if BRINTF_THREADLOCKED == 1
 #define brintf(args...) brintf_threadlocked(args)
-void brintf_threadlocked(char *format,...);
+void brintf_threadlocked(char *format,...) __attribute__ ((format (printf, 1,2)));
 #elif BRINTF_FILEOUT == 1
 #define brintf(args...) brintf_fileout(args)
-void brintf_fileout(char *format,...);
+void brintf_fileout(char *format,...) __attribute__ ((format (printf, 1,2)));
 #else
 #define brintf(args...) brintf_plain(args)
-void brintf_plain(char *format,...);
+void brintf_plain(char *format,...) __attribute__ ((format (printf, 1,2)));
 #endif
 
 #define BFD_SET(fd,fdset) brintf("WORKER - Select() - Checking for %d ('" #fd "') for " #fdset "\n",fd);FD_SET(fd,fdset)

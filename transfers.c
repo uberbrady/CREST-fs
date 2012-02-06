@@ -78,7 +78,7 @@ transfer_t *new_transfer(char *resource,char *verb,char *headers ,int bodyfd,int
 			
 			//open FD for ...file? tmpfile? Something?
 			cresttemp(transfers[i].tmpfilename,MAXFILENAME);
-			transfers[i].filesock=open(transfers[i].tmpfilename,O_RDWR|O_CREAT|O_EXCL|O_NONBLOCK);
+			transfers[i].filesock=open(transfers[i].tmpfilename,O_RDWR|O_CREAT|O_EXCL|O_NONBLOCK,0750);
 			//do we have to check if we somehow -1'ed?
 			transfers[i].status=Sending;
 			int is_directory=-1;
@@ -140,14 +140,8 @@ handle_transfers(fd_set *readset,fd_set *writeset)
 					// ADD A WHOLE BUNCHA CRAP HERE
 					//
 					// THIS BELONGS HERE
-					int is_directory=-1;
-					if(fetchstatus(transfers[i].headers)==304) {
-						//somehow refer back to what's on disk?
-						//TOUCH METAFILE!
-						utimes(metafile(transfers[i].metafilename,&is_directory),0); //BLOCKING 
-					} else {
-						rename_mkdirs(metatmp_http(transfers[i].websock),transfers[i].metafilename);
-					}
+					//FIXME - this is where funny header business ought to go, and retry logic
+					//we ought to finis the http connection stuff here, but only into a buffer to (optoinally) be copied into search results, etc.
 					if(!has_body_http(transfers[i].websock)) {
 						close(transfers[i].filesock);
 						unlink(transfers[i].tmpfilename);
@@ -169,8 +163,20 @@ handle_transfers(fd_set *readset,fd_set *writeset)
 					}
 					//we can't do this till we're done grabbing things from the http status - has_body_http is one good example
 					//to see if we yank the body or not.
+					char *metatmp=metatmp_http(transfers[i].websock);
 					finish_http(transfers[i].websock,transfers[i].hostname,transfers[i].headers); //should deallocate the http
 					transfers[i].websock=0;
+
+					if(fetchstatus(transfers[i].headers)==304) {
+						//somehow refer back to what's on disk?
+						//TOUCH METAFILE!
+						brintf("WORKER - Transfers - handle_transfers - 304 detected! Just touching utimes and deleting tmp\n");
+						unlink(metatmp);
+						utimes(transfers[i].metafilename,0); //BLOCKING 
+					} else {
+						brintf("WORKER - Transfers - handle_transfers - Regular HTTP status of %d detected, renaming metafile...\n",fetchstatus(transfers[i].headers));
+						rename_mkdirs(metatmp,transfers[i].metafilename);
+					}
 					
 					/* BEGIN FREAKY DEAKY TEST */
 /*					char freakybuf[65535];
@@ -194,6 +200,7 @@ handle_transfers(fd_set *readset,fd_set *writeset)
 
 int transfer_completed(transfer_t *tr,char *header,int *datafd)
 {
+	brintf("WORKER: Transfers - transfer_completed - running with data FD: %d, and header: %s\n",*datafd,header);
 	if(tr==0) {
 		brintf("WORKER: Transfers - transfer_completed - ERROR - tried to check transfer_completed on a NULL transfer!!!\n");
 		return 0;
@@ -208,5 +215,6 @@ int transfer_completed(transfer_t *tr,char *header,int *datafd)
 	if(tr->websock) {
 		brintf("WORKER: Transfers - transfer_completed - WARNING - completing transfer with a VALID websock?!!? Continuing silently...\n");
 	}
+	brintf("WORKER: Transfers - transfer_completed - returning true! Transfer *is* completed!\n");
 	return 1;
 }

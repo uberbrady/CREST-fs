@@ -71,16 +71,16 @@ common.o: common.c common.h resource.h Makefile http.h
 http.o: http.c http.h Makefile
 	gcc $(CFLAGS) $(SILENCE) -Wall -W -Werror -idirafter $(FUSEINC) -c -o http.o http.c
 
-worker.o: worker.c worker.h transfers.h
+worker.o: worker.c worker.h transfers.h common.h
 	gcc $(WORKERCFLAGS) $(SILENCE) -Wall -W -Werror -c -o worker.o worker.c
 
-metacache.o: worker.h metacache.h metacache.c
+metacache.o: worker.h metacache.h metacache.c common.h
 	gcc $(WORKERCFLAGS) $(SILENCE) -Wall -W -Werror -c -o metacache.o metacache.c
 
-transfers.o: transfers.c transfers.h async_http.h
+transfers.o: transfers.c transfers.h async_http.h common.h
 	gcc $(WORKERCFLAGS) $(SILENCE) -Wall -W -Werror -c -o transfers.o transfers.c
 
-async_http.o: async_http.c async_http.h
+async_http.o: async_http.c async_http.h common.h
 	gcc $(WORKERCFLAGS) $(SILENCE) -Wall -W -Werror -c -o async_http.o async_http.c
 
 

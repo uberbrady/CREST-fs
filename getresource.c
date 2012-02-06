@@ -29,9 +29,9 @@ int main( int argc, char **argv )
 		printf("Usage: %s CACHEAGE CACHEROOT\n",argv[0]);
 		exit(1);
 	}
+	maxcacheage=atoi(argv[1]); //MUST do this *BEFORE* starting worker!!!!!
 	init_worker("/tmp/crestfs.sock",argv[2]);
 	init_thread_resources();
-	maxcacheage=atoi(argv[1]);
 	printf("Max Cache Age Temporarily Configured To: %d\n",maxcacheage);
 	char pwd[1024];
 	getcwd(pwd,1024);

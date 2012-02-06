@@ -143,7 +143,7 @@ int get_block_http(http_t *h,void **ptr)
 	
 	*ptr=h->progress;
 	brintf("Some troubleshooting fun for get_block_http: Header starts at: %p, Progress puts us at: %p, end of buffer is at: %p\n",h->buffer,h->progress,h->endbuffer);
-	brintf("In absolute terms if the Header is ZERO then Progress is: %d bytes, and end is at %d bytes\n",h->progress-h->buffer,h->endbuffer-h->buffer);
+	brintf("In absolute terms if the Header is ZERO then Progress is: %ld bytes, and end is at %ld bytes\n",h->progress-h->buffer,h->endbuffer-h->buffer);
 	brintf("The data actually *is*: %s\n",h->buffer);
 	return h->endbuffer - h->progress; //number of bytes available in the buffer
 }
@@ -355,7 +355,7 @@ void handle_http(fd_set *readset,fd_set *writeset)
 			
 			case SendingHeaders:
 			if(FD_ISSET(httparray[j].fd,writeset)) {
-				brintf("I am trying to send headers: %s from offset: %d\n",httparray[j].headers,httparray[j].progress-httparray[j].headers);
+				brintf("I am trying to send headers: %s from offset: %ld\n",httparray[j].headers,httparray[j].progress-httparray[j].headers);
 				bytecounter=send(httparray[j].fd,httparray[j].progress,strlen(httparray[j].progress),0);
 				httparray[j].progress+=bytecounter;
 				if(strlen(httparray[j].progress)==0) {
@@ -600,7 +600,7 @@ http_t *new_http(char *resource,char *verb,char *headers,int bodyfd,int bodylen,
 			pathparse(resource,hostname,urlpath,80,1024);
 			int isdir=-1;
 			cresttemp(ht->tmpmetafile,METAFILELEN);
-			ht->metafd=open(ht->tmpmetafile,O_WRONLY|O_NONBLOCK|O_TRUNC|O_CREAT,0750);
+			ht->metafd=open(ht->tmpmetafile,O_WRONLY|O_NONBLOCK|O_TRUNC|O_CREAT|O_EXCL,0750);
 			brintf("Trying to open metafile %s , got file descriptor %d - file or directory?: %d\n",ht->tmpmetafile,ht->metafd,isdir);
 			ht->metaprogress=0;
 			for(j=0;j<MAX_KEEP;j++) {
